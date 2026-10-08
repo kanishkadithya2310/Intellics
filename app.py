@@ -1,8 +1,9 @@
 """Intellics v1.0 beta: Indian markets news, explained simply.
 
-- Animated background (optional photo) + 3D top-movers skyline you can spin and tap
+- Animated background (optional photo)
 - Every article gets a 3-4 sentence plain-English summary (free Groq AI, with an
   automatic no-AI fallback so no article is ever left without one)
+- Prices refresh every 30 seconds and show the time of the latest data point
 - Top gainers & losers tab with chart, company explorer and related news
 """
 from __future__ import annotations
@@ -23,12 +24,12 @@ import feedparser
 import plotly.graph_objects as go
 import requests
 import streamlit as st
-import streamlit.components.v1 as components
 import yfinance as yf
 
 # ----------------------------------------------------------------- settings
 VERSION = "1.0 beta"
-REFRESH_SECONDS = 120
+NEWS_REFRESH = 120   # seconds between news refreshes
+PRICE_REFRESH = 30   # seconds between price refreshes (as fast as the free source allows)
 MAX_STORIES = 40
 FEEDBACK_URL = ""          # paste your Google Form link to show a feedback button
 BACKGROUND_IMAGE_URL = ""  # optional: a free photo URL (e.g. from Unsplash) for the page background
@@ -220,7 +221,7 @@ def dedupe(stories: list[dict]) -> list[dict]:
     return kept
 
 
-@st.cache_data(ttl=REFRESH_SECONDS, show_spinner=False)
+@st.cache_data(ttl=NEWS_REFRESH, show_spinner=False)
 def load_news():
     stories, failed = [], []
     with ThreadPoolExecutor(max_workers=6) as pool:
@@ -247,7 +248,7 @@ def groq_key() -> str:
 def basic_summary(s: dict) -> str:
     """No-AI fallback: always gives 3-4 plain sentences, so no article is left without a summary."""
     blob = f"{s['title']} {s['summary']}"
-    items = [f"In short: {s['title'].rstrip('.!?')}."]
+    items = [f"{s['title'].rstrip('.!?')}."]
     extras = [x[:220] for x in sentences(s["summary"])[:2]] + [f"{n} means {m}." for n, m in glossary_hits(blob)[:2]]
     items += extras[:2]
     items.append(TOPIC_WHY[s["topics"][0]])
@@ -310,7 +311,7 @@ def _fast_info(ticker: str):
     return ticker, (last, (last / prev - 1) * 100)
 
 
-@st.cache_data(ttl=REFRESH_SECONDS, show_spinner=False)
+@st.cache_data(ttl=PRICE_REFRESH, show_spinner=False)
 def load_prices(tickers: tuple[str, ...]) -> dict[str, tuple[float, float]]:
     out: dict = {}
     try:
@@ -349,6 +350,24 @@ def load_history(ticker: str):
         return None
 
 
+@st.cache_data(ttl=PRICE_REFRESH, show_spinner=False)
+def load_data_time():
+    """Time of the newest 1-minute price point Yahoo has for the Nifty (shows how fresh the data really is)."""
+    try:
+        df = yf.download("^NSEI", period="1d", interval="1m", progress=False, auto_adjust=False)
+        if len(df):
+            ts = df.index[-1]
+            ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts
+            return ts.tz_convert(IST).to_pydatetime()
+    except Exception as exc:
+        log.warning("Data-time lookup failed: %s", exc)
+    return None
+
+
+def all_tickers() -> tuple[str, ...]:
+    return tuple(INDICES.values()) + tuple(t for t, _ in COMPANIES.values())
+
+
 def mover_rows(prices: dict) -> list[tuple[str, str, float, float]]:
     rows = [(n, tk, *prices[tk]) for n, (tk, _) in COMPANIES.items() if tk in prices]
     return sorted(rows, key=lambda r: r[3], reverse=True)
@@ -383,59 +402,17 @@ button{{min-height:44px;border-radius:12px!important}}
 </style>""", unsafe_allow_html=True)
 
 
-HERO_HTML = """<!doctype html><html><body style="margin:0;background:transparent;font-family:sans-serif;color:#fff">
-<div id="c" style="width:100%;height:300px;position:relative;touch-action:pan-y">
-<div id="tip" style="position:absolute;left:12px;top:10px;font-size:15px;font-weight:700;pointer-events:none">Drag to spin · tap a bar</div></div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script>
-const data=__DATA__, el=document.getElementById('c'), tip=document.getElementById('tip');
-try{
-const scene=new THREE.Scene(), cam=new THREE.PerspectiveCamera(42,1,.1,100);
-const r=new THREE.WebGLRenderer({antialias:true,alpha:true});r.setPixelRatio(Math.min(devicePixelRatio,2));el.appendChild(r.domElement);
-scene.add(new THREE.AmbientLight(0xffffff,.75));const d=new THREE.DirectionalLight(0xffffff,.9);d.position.set(5,10,8);scene.add(d);
-const g=new THREE.Group();scene.add(g);g.add(new THREE.GridHelper(18,18,0x4a5f8a,0x24324f));
-function label(t){const c=document.createElement('canvas');c.width=256;c.height=64;const x=c.getContext('2d');
- x.fillStyle='#fff';x.font='bold 30px sans-serif';x.textAlign='center';x.fillText(t,128,42);
- const s=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(c),transparent:true}));s.scale.set(2.4,.6,1);return s;}
-const bars=[],n=data.length;
-data.forEach((o,i)=>{const h=Math.max(.15,Math.min(Math.abs(o.p)*.9,5));
- const m=new THREE.Mesh(new THREE.BoxGeometry(.9,h,.9),new THREE.MeshStandardMaterial({color:o.p>=0?0x22c55e:0xef4444,metalness:.2,roughness:.4}));
- m.position.set((i-(n-1)/2)*1.35,o.p>=0?h/2:-h/2,0);m.userData=o;g.add(m);bars.push(m);
- const l=label(o.n);l.position.set(m.position.x,o.p>=0?h+.6:-h-.6,0);g.add(l);});
-cam.position.set(0,4.5,14);cam.lookAt(0,0,0);
-function size(){const w=el.clientWidth,h=el.clientHeight;r.setSize(w,h);cam.aspect=w/h;cam.fov=w<500?62:42;cam.updateProjectionMatrix();}
-new ResizeObserver(size).observe(el);size();
-let drag=false,moved=0,lx=0,run=true,sel=null;const calm=matchMedia('(prefers-reduced-motion:reduce)').matches;
-const ray=new THREE.Raycaster(),ndc=new THREE.Vector2();
-r.domElement.addEventListener('pointerdown',e=>{drag=true;moved=0;lx=e.clientX});
-addEventListener('pointerup',e=>{if(!drag)return;drag=false;if(moved<6){const b=r.domElement.getBoundingClientRect();
- ndc.set(((e.clientX-b.left)/b.width)*2-1,-((e.clientY-b.top)/b.height)*2+1);ray.setFromCamera(ndc,cam);
- const h=ray.intersectObjects(bars)[0];if(sel)sel.material.emissive.setHex(0);
- if(h){sel=h.object;sel.material.emissive.setHex(0x333333);const o=sel.userData;tip.textContent=o.n+'  '+(o.p>=0?'+':'')+o.p.toFixed(2)+'%';}}});
-addEventListener('pointermove',e=>{if(drag){moved+=Math.abs(e.clientX-lx);g.rotation.y+=(e.clientX-lx)*.01;lx=e.clientX}});
-new IntersectionObserver(e=>run=e[0].isIntersecting).observe(el);
-(function loop(){requestAnimationFrame(loop);if(!run||document.hidden)return;if(!drag&&!calm)g.rotation.y+=.004;r.render(scene,cam);})();
-}catch(e){tip.textContent='3D view is not supported on this device.';}
-</script></body></html>"""
+def header() -> None:
+    st.markdown('<div class="hero-title">📈 Intellics</div>'
+                '<div class="hero-sub">Indian market news and prices, in plain English.</div>', unsafe_allow_html=True)
 
 
-def hero(rows: list) -> None:
-    st.markdown('<div class="hero-title">📈 Markets, explained simply.</div>'
-                '<div class="hero-sub">Live news in plain English, with a 3D view of today\'s biggest movers.</div>',
-                unsafe_allow_html=True)
-    picks = rows[:5] + rows[-5:] if len(rows) >= 10 else rows
-    data = [{"n": r[0], "p": round(r[3], 2)} for r in picks] or [{"n": "—", "p": 0.4}] * 3
-    page = HERO_HTML.replace("__DATA__", json.dumps(data))
-    if hasattr(st, "iframe"):  # newer Streamlit
-        st.iframe(page, height=310)
-    else:
-        components.html(page, height=310)
-    if rows:
-        up = sum(1 for r in rows if r[3] > 0)
-        st.markdown(f'<div class="mood"><div style="width:{up / len(rows) * 100:.0f}%"></div></div>', unsafe_allow_html=True)
-        st.caption(f"Market mood: 🟢 {up} up · 🔴 {len(rows) - up} down among {len(rows)} large companies tracked")
-    else:
-        st.caption("Live prices are unavailable right now, so the 3D view is on hold.")
+def mood_bar(rows: list) -> None:
+    if not rows:
+        return
+    up = sum(1 for r in rows if r[3] > 0)
+    st.markdown(f'<div class="mood"><div style="width:{up / len(rows) * 100:.0f}%"></div></div>', unsafe_allow_html=True)
+    st.caption(f"Market mood: 🟢 {up} up · 🔴 {len(rows) - up} down among {len(rows)} large companies tracked")
 
 
 # ---------------------------------------------------------------- filters
@@ -484,9 +461,7 @@ def render_story(s: dict, summ: dict) -> None:
         st.markdown(f"**[{md_safe(s['title'])}]({safe_url(s['link'])})**")
         st.markdown(" ".join(f":blue-badge[{t}]" for t in s["topics"][:2]) + f"  \n<small>{md_safe(s['source'])} · {time_ago(s['ts'])}</small>",
                     unsafe_allow_html=True)
-        st.markdown(f"**In simple words:** {md_safe(summ['t'])}")
-        st.caption("✨ Simple summary written by AI from the headline and preview. Open the article for full details."
-                   if summ["m"] == "ai" else "Quick summary from the headline and preview. Open the article for full details.")
+        st.markdown(md_safe(summ["t"]))
         if s["tags"]:
             st.caption("Companies in this story: " + ", ".join(s["tags"]))
         terms = glossary_hits(f"{s['title']} {s['summary']}")
@@ -503,7 +478,7 @@ def news_tab(items: list[dict], total: int) -> None:
         st.button("Reset filters", on_click=reset_filters, key="reset_empty")
         return
     st.caption(f"Showing {len(items)} stories ({total} loaded)")
-    with st.spinner("Writing simple summaries…"):
+    with st.spinner("Loading summaries…"):
         summaries = get_summaries(items)
     for s in items:
         render_story(s, summaries[s["id"]])
@@ -575,36 +550,72 @@ def metrics_row(prices: dict) -> None:
                    help="Change vs previous close. Green = up, red = down." if v else "Data unavailable right now.")
 
 
-@st.fragment(run_every=f"{REFRESH_SECONDS}s")
-def dashboard() -> None:
-    stories, failed, fetched_at = load_news()
-    prices = load_prices(tuple(INDICES.values()) + tuple(t for t, _ in COMPANIES.values()))
-    rows = mover_rows(prices)
-    hero(rows)
+def price_status() -> str:
+    ts, open_ = load_data_time(), market_status().startswith("Market open")
+    if not ts:
+        return market_status()
+    lag = (datetime.now(IST) - ts).total_seconds() / 60
+    note = f" (about {lag:.0f} min behind the live exchange feed)" if open_ and lag > 2 else ""
+    return f"Latest price data: {ts:%H:%M} IST{note} · {market_status()}"
+
+
+@st.fragment(run_every=f"{PRICE_REFRESH}s")
+def price_bar() -> None:
+    prices = load_prices(all_tickers())
     metrics_row(prices)
-    st.caption(f"Updated {fetched_at:%H:%M:%S} IST · {len(stories)} stories · {market_status()} · refreshes every {REFRESH_SECONDS // 60} min")
+    st.caption(price_status() + f" · updates every {PRICE_REFRESH} sec")
+    mood_bar(mover_rows(prices))
+
+
+@st.fragment(run_every=f"{NEWS_REFRESH}s")
+def news_section() -> None:
+    stories, failed, fetched_at = load_news()
+    st.caption(f"News updated {fetched_at:%H:%M:%S} IST · refreshes every {NEWS_REFRESH // 60} min")
     if failed:
         st.caption(f"⚠️ Some sources did not respond ({', '.join(failed)}). Showing the rest.")
     if not stories:
         st.error("Couldn't load any news right now. Please tap Refresh now in a minute.")
         return
-    t_news, t_movers, t_focus = st.tabs(["📰 News", "📈 Gainers & losers", "🔥 Stocks in focus"])
-    with t_news:
-        news_tab(apply_filters(stories)[:MAX_STORIES], len(stories))
-    with t_movers:
-        movers_tab(rows, stories)
-    with t_focus:
-        focus_tab(stories, prices)
+    news_tab(apply_filters(stories)[:MAX_STORIES], len(stories))
+
+
+@st.fragment(run_every=f"{PRICE_REFRESH}s")
+def movers_section() -> None:
+    movers_tab(mover_rows(load_prices(all_tickers())), load_news()[0])
+    st.caption(price_status())
+
+
+@st.fragment(run_every="60s")
+def focus_section() -> None:
+    focus_tab(load_news()[0], load_prices(all_tickers()))
+
+
+DISCLAIMER = """**Disclaimer**
+
+Intellics is a student learning project made for educational purposes only. Nothing on this page is investment, financial, legal or tax advice, and nothing here is a recommendation or an offer to buy, sell or hold any security. The creators are not SEBI-registered investment advisers or research analysts.
+
+- **Prices and data** come from free third-party sources (Yahoo Finance). They may be delayed, incomplete or wrong, and may differ from the exchange, your broker or other apps. Always check the official NSE/BSE data or your broker before making any decision.
+- **News** belongs to its publishers and is linked, not reproduced. The short summaries are generated automatically from each headline and preview (not the full article), so they can miss details or contain mistakes. Please open the original article.
+- **Investing in shares carries risk,** including loss of money. Past performance does not guarantee future results. Please speak to a SEBI-registered adviser before investing.
+- This project is provided as is, without any guarantee, and the creators accept no liability for any loss arising from its use."""
 
 
 def main() -> None:
     init_state()
     inject_css()
+    header()
     filter_bar()
-    dashboard()
+    price_bar()
+    t_news, t_movers, t_focus = st.tabs(["📰 News", "📈 Gainers & losers", "🔥 Stocks in focus"])
+    with t_news:
+        news_section()
+    with t_movers:
+        movers_section()
+    with t_focus:
+        focus_section()
     st.divider()
-    st.caption(f"Intellics {VERSION} · For learning only. Not investment advice. Headlines belong to their publishers; "
-               "open the link for the full story. Prices from Yahoo Finance and may be delayed.")
+    st.caption(DISCLAIMER)
+    st.caption(f"Intellics {VERSION}")
     if FEEDBACK_URL:
         st.link_button("Found a problem? Tell us", FEEDBACK_URL)
 
