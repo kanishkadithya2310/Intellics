@@ -41,6 +41,7 @@ TAGLINE = "Think | Analyze | Evolve"
 LOGO_PATH = Path(__file__).parent / "logo.png"  # upload logo.png next to this file
 FEEDBACK_URL = ""          # paste your Google Form link to show a feedback button
 BACKGROUND_IMAGE_URL = ""  # optional: a free photo URL (e.g. from Unsplash) for the page background
+VIDEO_URL = "https://cdn.jsdelivr.net/gh/kanishkadithya2310/Intellics@main/hero.mp4"  # "" turns the video off
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.1-8b-instant"  # free-tier model; change if Groq renames it
 IST, UTC = ZoneInfo("Asia/Kolkata"), timezone.utc
@@ -415,6 +416,22 @@ button{{min-height:44px;border-radius:12px!important}}
 </style>""", unsafe_allow_html=True)
 
 
+def video_background() -> None:
+    """Full-screen looping hero video behind the page. Set VIDEO_URL = "" to switch it off."""
+    if not VIDEO_URL:
+        return
+    st.markdown(f"""<style>
+html,body{{background:#0a0f1f}}
+.stApp,[data-testid="stAppViewContainer"],[data-testid="stHeader"]{{background:transparent!important}}
+.stApp::before{{display:none}}
+.hero-video{{position:fixed;top:0;left:0;width:100vw;height:100vh;object-fit:cover;z-index:-1}}
+.hero-overlay{{position:fixed;inset:0;background:rgba(10,15,31,.6);z-index:-1}}
+</style>
+<video class="hero-video" autoplay loop muted playsinline>
+<source src="{VIDEO_URL}" type="video/mp4"></video>
+<div class="hero-overlay"></div>""", unsafe_allow_html=True)
+
+
 @lru_cache(maxsize=1)
 def logo_html() -> str:
     try:
@@ -626,6 +643,7 @@ Intellics is a student learning project made for educational purposes only. Noth
 def main() -> None:
     init_state()
     inject_css()
+    video_background()
     header()
     filter_bar()
     price_bar()
