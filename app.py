@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import html
 import json
@@ -15,6 +16,8 @@ import logging
 import re
 import threading
 import time
+from functools import lru_cache
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
@@ -25,12 +28,17 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 import yfinance as yf
+from PIL import Image
 
 # ----------------------------------------------------------------- settings
 VERSION = "1.0 beta"
 NEWS_REFRESH = 120   # seconds between news refreshes
 PRICE_REFRESH = 30   # seconds between price refreshes (as fast as the free source allows)
 MAX_STORIES = 40
+ORG_NAME = "Intellics Committee"
+ORG_SUBTITLE = "The AI and Data Analytics Committee"
+TAGLINE = "Think | Analyze | Evolve"
+LOGO_PATH = Path(__file__).parent / "logo.png"  # upload logo.png next to this file
 FEEDBACK_URL = ""          # paste your Google Form link to show a feedback button
 BACKGROUND_IMAGE_URL = ""  # optional: a free photo URL (e.g. from Unsplash) for the page background
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -130,7 +138,11 @@ SYSTEM_PROMPT = (
 PLOT_KW = {} if hasattr(st, "iframe") else {"use_container_width": True}  # new vs old Streamlit
 log = logging.getLogger("intellics")
 logging.basicConfig(level=logging.INFO)
-st.set_page_config(page_title="Intellics", page_icon="📈", layout="wide", initial_sidebar_state="collapsed")
+try:
+    PAGE_ICON = Image.open(LOGO_PATH)
+except Exception:
+    PAGE_ICON = "📈"
+st.set_page_config(page_title="Intellics Committee", page_icon=PAGE_ICON, layout="wide", initial_sidebar_state="collapsed")
 
 
 def _compile(alias: str) -> re.Pattern:
@@ -389,11 +401,12 @@ def inject_css() -> None:
  background-image:linear-gradient(rgba(255,255,255,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.03) 1px,transparent 1px);
  background-size:42px 42px;animation:drift 40s linear infinite}}
 @keyframes drift{{to{{background-position:42px 42px}}}}
-.block-container{{padding-top:1.2rem;max-width:1100px;position:relative;z-index:1}}
+.block-container{{padding-top:4.5rem;max-width:1100px;position:relative;z-index:1}}
 div[class*="st-key-card_"]{{background:rgba(255,255,255,.05);backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,.1);
  border-radius:18px;padding:.4rem .6rem;transition:transform .2s,border-color .2s}}
 div[class*="st-key-card_"]:hover{{transform:translateY(-3px);border-color:rgba(120,160,255,.6)}}
-.hero-title{{font-size:2.1rem;font-weight:800;line-height:1.15;margin:.2rem 0}}
+.hero-title{{font-size:2rem;font-weight:800;letter-spacing:.12em;line-height:1.15;margin:0}}
+.brand{{display:flex;align-items:center;gap:16px;margin-bottom:.3rem}}
 .hero-sub{{opacity:.8;margin-bottom:.6rem}}
 .mood{{height:12px;border-radius:99px;overflow:hidden;background:#ef4444;margin:.3rem 0 .2rem}}
 .mood>div{{height:100%;background:#22c55e;transition:width .6s}}
@@ -402,8 +415,18 @@ button{{min-height:44px;border-radius:12px!important}}
 </style>""", unsafe_allow_html=True)
 
 
+@lru_cache(maxsize=1)
+def logo_html() -> str:
+    try:
+        b64 = base64.b64encode(LOGO_PATH.read_bytes()).decode()
+        return f'<img src="data:image/png;base64,{b64}" alt="{ORG_NAME} logo" style="height:78px;width:78px;flex:none;border-radius:16px">'
+    except OSError:
+        return '<div style="font-size:3rem;flex:none">📈</div>'  # logo.png missing: fall back to an emoji
+
+
 def header() -> None:
-    st.markdown('<div class="hero-title">📈 Intellics</div>'
+    st.markdown(f'<div class="brand">{logo_html()}<div><div class="hero-title">{ORG_NAME}</div>'
+                f'<div class="hero-sub" style="margin:.15rem 0 0">{ORG_SUBTITLE} · {TAGLINE}</div></div></div>'
                 '<div class="hero-sub">Indian market news and prices, in plain English.</div>', unsafe_allow_html=True)
 
 
@@ -615,7 +638,7 @@ def main() -> None:
         focus_section()
     st.divider()
     st.caption(DISCLAIMER)
-    st.caption(f"Intellics {VERSION}")
+    st.caption(f"{ORG_NAME} {VERSION}")
     if FEEDBACK_URL:
         st.link_button("Found a problem? Tell us", FEEDBACK_URL)
 
