@@ -133,9 +133,10 @@ GLOSSARY = [  # (name, regex, plain meaning)
     ("Circuit limit", r"upper circuit|lower circuit", "the daily limit beyond which a share's price is not allowed to move"),
 ]
 # ------------------------------------------------- Financial terms library
-# One new term per day, in this fixed order, so nothing repeats until all have been shown.
-# To add more: append new lines at the END of the list (this keeps past days unchanged).
+# Ten new terms per day, in this fixed order, so nothing repeats until all have been shown.
+# To add more: append new lines at the END of the list, in groups of 10 (this keeps past days unchanged).
 START_DATE = date(2026, 10, 8)  # day 1 of the cycle
+TERMS_PER_DAY = 10  # new terms shown every day (keep len(TERMS) a multiple of this)
 TERMS = [  # (term, category, simple meaning, example)
     ("Mutual fund", "Investing", "A pool of money from many investors, managed by a professional who buys shares, bonds or other assets.", "Priya puts ₹1,000 in a mutual fund instead of picking shares herself."),
     ("Bid and ask", "Markets", "The bid is the highest price buyers offer; the ask is the lowest price sellers will accept.", "A share shows bid ₹99.90 and ask ₹100.10."),
@@ -227,6 +228,66 @@ TERMS = [  # (term, category, simple meaning, example)
     ("ESG", "Company", "Environmental, Social and Governance: ways of judging how responsibly a company runs its business.", "Investors favour firms that cut pollution and treat workers fairly."),
     ("Income statement", "Company", "A report showing a company's sales, costs and profit over a period. It is also called the profit and loss (P&L) account.", "The quarterly results show sales up 8% and profit up 12%."),
     ("Currency depreciation", "Economy", "When a currency loses value against another. For example, the rupee weakens against the dollar.", "If the rupee falls from ₹84 to ₹86 per dollar, imports cost more."),
+    ("Portfolio", "Investing", "The full collection of investments you hold, such as shares, funds, bonds and gold.", "Your portfolio has two mutual funds, some shares and a gold bond."),
+    ("Capital gains", "Investing", "The profit you make when you sell an investment for more than you paid. It is taxed.", "You buy at ₹100 and sell at ₹130, so your capital gain is ₹30."),
+    ("Rupee cost averaging", "Investing", "Investing a fixed amount regularly, so you buy more units when prices are low and fewer when they are high.", "₹1,000 buys 10 units at ₹100 but 20 units at ₹50."),
+    ("Exit load", "Investing", "A fee some mutual funds charge if you sell units too soon after buying.", "A fund charges 1% if you withdraw within one year."),
+    ("Direct vs regular plan", "Investing", "A direct plan is bought straight from the fund house with a lower fee; a regular plan goes through a distributor who is paid a commission.", "The same fund has a lower expense ratio in its direct plan."),
+    ("Benchmark", "Investing", "A standard index used to judge how well a fund or portfolio is doing.", "A large-cap fund is compared with the Nifty 50."),
+    ("Beta", "Investing", "A number showing how much a share moves compared with the market. Above 1 means it swings more than the market.", "A share with beta 1.5 may rise 15% when the market rises 10%."),
+    ("ELSS", "Investing", "Equity Linked Savings Scheme: a mutual fund that invests in shares and has a three-year lock-in. It can help save tax.", "You invest ₹50,000 in an ELSS fund and cannot withdraw for three years."),
+    ("PPF", "Investing", "Public Provident Fund: a government-backed long-term savings scheme with fixed interest and tax benefits.", "You deposit money every year for 15 years and earn government-set interest."),
+    ("Sovereign Gold Bond", "Investing", "A government bond priced in grams of gold. It pays yearly interest and avoids storing physical gold.", "You hold 5 grams of gold on paper and also earn interest."),
+    ("Bonds", "Investing", "A loan you give to a company or government in return for regular interest and your money back on a set date.", "You lend ₹10,000 for five years and receive interest every year."),
+    ("Mid-cap", "Investing", "A company of medium size by market value, between large-caps and small-caps. It can grow faster than large-caps but is riskier.", "A growing manufacturer worth ₹20,000 crore is often a mid-cap."),
+    ("Emergency fund", "Investing", "Money kept safe and easy to reach to cover unexpected costs, usually three to six months of expenses.", "You keep ₹1.5 lakh in a savings account in case of a medical bill."),
+    ("SWP", "Investing", "Systematic Withdrawal Plan: taking a fixed amount out of a mutual fund at regular intervals.", "A retiree withdraws ₹20,000 from a fund every month."),
+    ("Growth vs value investing", "Investing", "Growth investors buy fast-growing companies; value investors buy companies that look cheap compared with their worth.", "One investor buys a fast-growing app firm; another buys a cheap but steady cement company."),
+    ("Call and put options", "Markets", "A call gives you the right to buy at a set price; a put gives you the right to sell at a set price.", "You buy a put option to gain if a share falls."),
+    ("Strike price and premium", "Markets", "The strike price is the fixed price in an options contract; the premium is what you pay to buy the option.", "You pay a ₹5 premium for an option with a strike price of ₹100."),
+    ("Lot size", "Markets", "The fixed number of units you must trade in one futures or options contract.", "A contract with lot size 50 means you trade 50 shares at a time."),
+    ("Expiry", "Markets", "The last date on which a futures or options contract is valid.", "Nifty options expire on a fixed weekday every week."),
+    ("Open interest", "Markets", "The total number of futures or options contracts that are still open and not yet settled.", "Rising open interest means more traders are taking new positions."),
+    ("Intraday trading", "Markets", "Buying and selling the same share within one trading day, so nothing is held overnight.", "You buy at 10 am and sell at 2 pm the same day."),
+    ("Delivery trading", "Markets", "Buying shares and keeping them in your demat account for more than one day.", "You buy shares today and hold them for months."),
+    ("Bulk and block deals", "Markets", "Very large share trades. Bulk deals are reported by exchanges; block deals are big trades done in a special window.", "A fund buys 2 lakh shares of a company in one go."),
+    ("Market depth", "Markets", "A list of the buy and sell orders waiting at different prices for a share.", "Depth shows many buyers at ₹99 and many sellers at ₹101."),
+    ("Gap up and gap down", "Markets", "When a share opens much higher (gap up) or lower (gap down) than its previous close.", "A share closes at ₹100 and opens next day at ₹106."),
+    ("Breakout", "Markets", "When a price moves above a resistance level or below a support level, often on high volume.", "A share stuck near ₹200 for weeks suddenly jumps to ₹215."),
+    ("Moving average", "Markets", "The average price over a set number of days, drawn as a smooth line to show the trend.", "A 50-day moving average smooths out daily ups and downs."),
+    ("RSI", "Markets", "Relative Strength Index: a number from 0 to 100 that traders use to judge if a share has risen or fallen too fast.", "An RSI above 70 is often read as overbought."),
+    ("Upper and lower circuit", "Markets", "The highest and lowest price a share is allowed to reach in one day.", "A share hits its upper circuit and no more buying is allowed at higher prices that day."),
+    ("FII and DII", "Markets", "Foreign Institutional Investors and Domestic Institutional Investors: big organisations that invest in Indian shares, from abroad or from India.", "Mutual funds and insurers are DIIs; overseas funds are FIIs."),
+    ("CPI inflation", "Economy", "Consumer Price Index: tracks how the price of a typical basket of things households buy is changing.", "Rising vegetable and fuel prices push CPI inflation up."),
+    ("WPI", "Economy", "Wholesale Price Index: tracks price changes of goods sold in bulk between businesses.", "A rise in steel and chemical prices lifts WPI."),
+    ("Core inflation", "Economy", "Inflation after removing food and fuel prices, which swing a lot.", "Core inflation shows the steadier price trend."),
+    ("GDP", "Economy", "Gross Domestic Product: the total value of everything a country produces in a period. It shows the size and growth of the economy.", "India's GDP grew 7% over the year."),
+    ("GVA", "Economy", "Gross Value Added: the value of goods and services produced, minus the cost of the materials used to make them.", "A bakery's GVA is its sales minus flour, sugar and power costs."),
+    ("Base effect", "Economy", "When a growth rate looks high or low just because the number from a year ago was unusually low or high.", "Growth looks big after a weak year because the starting point was low."),
+    ("PMI", "Economy", "Purchasing Managers' Index: a survey of businesses. A reading above 50 means activity is growing, below 50 means it is shrinking.", "A manufacturing PMI of 56 suggests factories are busy."),
+    ("IIP", "Economy", "Index of Industrial Production: measures how much factories, mines and power plants are producing.", "A rise in IIP shows industrial output is growing."),
+    ("Money supply", "Economy", "The total amount of money in the economy, such as cash and bank deposits.", "More money chasing the same goods can push prices up."),
+    ("FDI", "Economy", "Foreign Direct Investment: when a foreign company or investor puts money into a business in another country for the long term.", "A foreign carmaker builds a new factory in India."),
+    ("Balance of payments", "Economy", "A record of all money flowing into and out of a country from trade and investments.", "More dollars coming in than going out improves the balance."),
+    ("Yield curve", "Economy", "A line showing interest rates on bonds of different time lengths, from short to long.", "Long-term bonds usually pay more than short-term ones."),
+    ("Quantitative easing", "Economy", "When a central bank creates money to buy bonds, to push down interest rates and boost spending.", "A central bank buys government bonds in large amounts during a crisis."),
+    ("MSP", "Economy", "Minimum Support Price: the lowest price at which the government promises to buy certain crops from farmers.", "The government buys wheat at the MSP if the market price falls below it."),
+    ("GST", "Economy", "Goods and Services Tax: a single indirect tax added to most things we buy, replacing many older taxes.", "A 5% GST on a ₹100 item makes it cost ₹105."),
+    ("IPO", "Company", "Initial Public Offering: the first time a company offers its shares to the public to raise money.", "A startup lists on the stock exchange after its IPO."),
+    ("Anchor investor", "Company", "A big institutional investor that buys shares in an IPO just before it opens to the public.", "Mutual funds invest ₹500 crore as anchors a day before an IPO."),
+    ("Listing gain", "Company", "The profit made if a share lists at a higher price than its IPO price.", "An IPO priced at ₹100 lists at ₹120, a listing gain of 20%."),
+    ("Offer for sale (OFS)", "Company", "When existing shareholders, such as promoters, sell some of their shares to the public through the exchange.", "The government sells part of its stake in a company through an OFS."),
+    ("QIP", "Company", "Qualified Institutional Placement: a listed company raises money by selling new shares to big institutions.", "A company raises ₹1,000 crore from funds through a QIP."),
+    ("YoY and QoQ", "Company", "Year-on-Year compares with the same period last year; Quarter-on-Quarter compares with the previous quarter.", "Profit is up 10% YoY but down 3% QoQ."),
+    ("EBITDA", "Company", "Earnings before interest, tax, depreciation and amortisation: profit from core operations before such costs.", "A firm with ₹200 crore EBITDA earns that from its main business."),
+    ("Operating margin", "Company", "The percentage of sales left as profit after the costs of running the business, before interest and tax.", "₹15 of operating profit on ₹100 of sales is a 15% margin."),
+    ("Free cash flow", "Company", "The cash left after a company pays for its operations and for investing in equipment and buildings.", "A company with ₹80 crore free cash flow can pay dividends or reduce debt."),
+    ("Capex", "Company", "Capital expenditure: money a company spends on long-lasting assets such as factories and machines.", "A steel maker spends ₹2,000 crore on a new plant."),
+    ("Promoter pledge", "Company", "When a company's owners use their shares as security to borrow money. A high pledge can be a warning sign.", "Founders pledge 30% of their shares to a lender."),
+    ("Demerger", "Company", "When a company splits one of its businesses into a separate company, with its own shares.", "A group separates its finance arm into a new listed company."),
+    ("Dividend payout ratio", "Company", "The share of a company's profit that is paid out to shareholders as dividends.", "Paying ₹30 out of ₹100 profit is a 30% payout ratio."),
+    ("Consolidated vs standalone", "Company", "Standalone results show only the parent company; consolidated results include its subsidiaries too.", "Consolidated sales are higher because they add the subsidiaries' sales."),
+    ("Order book", "Company", "The value of confirmed orders a company has received but not yet completed or delivered.", "A construction firm has an order book of ₹10,000 crore."),
 ]
 assert len({t[0] for t in TERMS}) == len(TERMS), "duplicate term in TERMS"
 
@@ -768,21 +829,23 @@ def focus_section() -> None:
     focus_tab(load_news()[0], get_prices())
 
 
-def term_for(day: date) -> tuple:
-    return TERMS[(day - START_DATE).days % len(TERMS)]
+def terms_for(day: date) -> list[tuple]:
+    """The TERMS_PER_DAY terms for a given day, in a fixed order that wraps around only after the whole library is used."""
+    start = (day - START_DATE).days * TERMS_PER_DAY
+    return [TERMS[(start + i) % len(TERMS)] for i in range(TERMS_PER_DAY)]
 
 
-@st.fragment(run_every="30m")  # re-checks the date so the term changes at midnight even on an open page
+@st.fragment(run_every="30m")  # re-checks the date so the terms change at midnight even on an open page
 def terms_section() -> None:
     today = datetime.now(IST).date()
-    term, cat, meaning, example = term_for(today)
-    with st.container(border=True, key="card_term_of_day"):
-        st.caption(f"📚 Term of the day · {today:%A, %d %B %Y}")
-        st.markdown(f"## {md_safe(term)}")
-        st.markdown(f":blue-badge[{cat}]")
-        st.markdown(md_safe(meaning))
-        st.markdown(f"*Example:* {md_safe(example)}")
-    st.caption(f"A new term every day, in a fixed order, so nothing repeats for {len(TERMS)} days.")
+    st.subheader(f"📚 {TERMS_PER_DAY} terms of the day · {today:%A, %d %B %Y}")
+    for n, (term, cat, meaning, example) in enumerate(terms_for(today), 1):
+        with st.container(border=True, key=f"card_term_{n}"):
+            st.markdown(f"**{n}. {md_safe(term)}**  :blue-badge[{cat}]")
+            st.markdown(md_safe(meaning))
+            st.markdown(f"*Example:* {md_safe(example)}")
+    cycle_days = -(-len(TERMS) // TERMS_PER_DAY)
+    st.caption(f"{TERMS_PER_DAY} new terms every day, in a fixed order, so nothing repeats for {cycle_days} days ({len(TERMS)} terms in the library).")
 
     seen: Counter = Counter()
     for s in load_news()[0]:
@@ -797,8 +860,8 @@ def terms_section() -> None:
     if past:
         with st.expander("🗓️ Previous days"):
             for d in past:
-                t, c, m, _ = term_for(d)
-                st.markdown(f"**{d:%a %d %b} · {md_safe(t)}**: {md_safe(m)}")
+                names = ", ".join(md_safe(t[0]) for t in terms_for(d))
+                st.markdown(f"**{d:%a %d %b}**: {names}")
 
     with st.expander("🔎 Browse all terms"):
         pick = st.pills("Category", ["All", "Investing", "Markets", "Economy", "Company"], selection_mode="single",
