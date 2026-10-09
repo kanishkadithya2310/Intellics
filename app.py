@@ -1,11 +1,15 @@
-"""Intellics v1.0 beta: Indian markets news, explained simply.
+"""Intellics v1.2 beta: Indian markets news, explained simply.
 
 - Animated background (optional photo)
+- Only well-known, reputable news sources (Economic Times, Moneycontrol, Mint, Business Standard,
+  BusinessLine, Times of India, Hindustan Times, News18, Dalal Street Journal, HDFC Sky and
+  Google News results limited to trusted publishers)
 - Every article gets a 3-4 sentence plain-English summary (free Groq AI, with an
   automatic no-AI fallback so no article is ever left without one)
 - Prices refresh every 30 seconds and show the time of the latest data point
-- Top gainers & losers tab with an interactive company explorer (range buttons, candles,
-  "why it moved" headlines on big days, and a quick analysis card: P/E, debt to equity, ROE...)
+- Top gainers & losers tab with a Groww/Zerodha-style company page: big price header, range buttons,
+  line or candle chart with volume and moving averages, "why it moved" headlines on big days,
+  today's and 52-week range bars, and a clean fundamentals table (P/E, debt to equity, ROE...)
 - Upcoming dividends, splits and bonus issues
 - 10 financial terms a day (600 unique terms in terms.py, no repeats for 60 days)
 - Works on phones too: responsive cards, and the hero video always shows the whole picture
@@ -31,11 +35,13 @@ from difflib import SequenceMatcher
 from zoneinfo import ZoneInfo
 
 import feedparser
+import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
 import yfinance as yf
 from PIL import Image
+from plotly.subplots import make_subplots
 
 try:
     from terms import TERMS  # terms.py must sit next to app.py
@@ -43,7 +49,7 @@ except Exception:  # keep the app alive even if the file is missing
     TERMS = []
 
 # ----------------------------------------------------------------- settings
-VERSION = "1.1 beta"
+VERSION = "1.2 beta"
 NEWS_REFRESH = 120   # seconds between news refreshes
 PRICE_REFRESH = 30   # seconds between price refreshes (as fast as the free source allows)
 MAX_STORIES = 40
@@ -59,15 +65,48 @@ GROQ_MODEL = "llama-3.1-8b-instant"  # free-tier model; change if Groq renames i
 IST, UTC = ZoneInfo("Asia/Kolkata"), timezone.utc
 HEADERS = {"User-Agent": "Mozilla/5.0 (Intellics beta; learning project)"}
 
-# Replace with the feed URLs already used in your app if they differ.
+
+def _gnews(query: str) -> str:
+    """Google News search feed (India edition). Used for sites that have no RSS feed of their own."""
+    return ("https://news.google.com/rss/search?q=" + urllib.parse.quote_plus(query, safe=":")
+            + "&hl=en-IN&gl=IN&ceid=IN:en")
+
+
+# Only well-known, reputable publishers. Each source has one or more feed URLs; if the first
+# one does not work, the next one is tried. To add or remove a source, edit this list.
 SOURCES = {
-    "Economic Times": "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
-    "Moneycontrol": "https://www.moneycontrol.com/rss/MCtopnews.xml",
-    "Mint": "https://www.livemint.com/rss/markets",
-    "Business Standard": "https://www.business-standard.com/rss/markets-106.rss",
-    "BusinessLine": "https://www.thehindubusinessline.com/markets/feeder/default.rss",
-    "Google News": "https://news.google.com/rss/search?q=Sensex+OR+Nifty+OR+RBI+when:1d&hl=en-IN&gl=IN&ceid=IN:en",
+    "Economic Times": ["https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms"],
+    "Moneycontrol": ["https://www.moneycontrol.com/rss/MCtopnews.xml",
+                     "https://www.moneycontrol.com/rss/latestnews.xml"],
+    "Mint": ["https://www.livemint.com/rss/markets"],
+    "Business Standard": ["https://www.business-standard.com/rss/markets-106.rss"],
+    "BusinessLine": ["https://www.thehindubusinessline.com/markets/feeder/default.rss"],
+    "Times of India": ["https://timesofindia.indiatimes.com/rssfeeds/1898055.cms"],
+    "Hindustan Times": ["https://www.hindustantimes.com/feeds/rss/business/rssfeed.xml",
+                        "https://www.hindustantimes.com/rss/business/rssfeed.xml"],
+    "News18": ["https://www.news18.com/commonfeeds/v1/eng/rss/business.xml",
+               "https://www.news18.com/rss/business.xml",
+               "https://www.news18.com/rss/markets.xml"],
+    # These two have no RSS feed of their own, so we read their latest articles through Google News.
+    "Dalal Street Journal": [_gnews("site:dsij.in when:14d")],
+    "HDFC Sky": [_gnews("site:hdfcsky.com when:7d")],
+    "Google News": [_gnews("(Sensex OR Nifty OR RBI) when:1d")],
 }
+GOOGLE_SOURCES = {"Google News", "Dalal Street Journal", "HDFC Sky"}  # feeds whose titles end with " - Publisher"
+
+# Google News mixes in every kind of website, so its stories are kept ONLY if the publisher is on this list.
+TRUSTED_PUBLISHERS = {
+    "times of india", "economic times", "mint", "livemint", "moneycontrol", "business standard",
+    "hindu businessline", "businessline", "hindustan times", "news18", "cnbctv18", "cnbc-tv18",
+    "dalal street investment journal", "dalal street journal", "dsij", "hdfc sky",
+    "reuters", "financial express", "ndtv profit",
+}
+
+
+def trusted_publisher(name: str) -> bool:
+    return re.sub(r"^the\s+", "", name.strip().lower()) in TRUSTED_PUBLISHERS
+
+
 INDICES = {"Sensex": "^BSESN", "Nifty 50": "^NSEI", "Brent crude (USD/bbl)": "BZ=F", "Gold (USD/oz)": "GC=F"}
 
 COMPANIES = {  # name -> (Yahoo ticker, alias regexes; short ALL-CAPS aliases match case-sensitively)
@@ -205,9 +244,14 @@ def build_story(entry, source: str) -> dict | None:
     if not title or not link:
         return None
     shown = source
-    if source == "Google News" and " - " in title:
+    if source in GOOGLE_SOURCES and " - " in title:
         title, publisher = title.rsplit(" - ", 1)
-        shown = f"Google News ({publisher})"
+        if source == "Google News":
+            if not trusted_publisher(publisher):  # keep only reputable publishers
+                return None
+            shown = f"Google News ({publisher.strip()})"
+    elif source == "Google News":
+        return None  # no publisher name, so we cannot vouch for it
     summary = clean_text(entry.get("summary") or entry.get("description") or "")
     if summary.lower().startswith(title.lower()[:40]) or SequenceMatcher(None, summary.lower(), title.lower()).ratio() > 0.8:
         summary = ""
@@ -223,14 +267,20 @@ def build_story(entry, source: str) -> dict | None:
 
 
 def fetch_feed(item):
-    name, url = item
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=8)
-        resp.raise_for_status()
-        return name, feedparser.parse(resp.content).entries, None
-    except Exception as exc:
-        log.warning("Feed failed: %s (%s)", name, exc)
-        return name, [], str(exc)
+    """item = (source name, list of feed URLs). Tries each URL in order until one gives stories."""
+    name, urls = item
+    err = "no stories found"
+    for url in urls:
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=8)
+            resp.raise_for_status()
+            entries = feedparser.parse(resp.content).entries
+            if entries:
+                return name, entries, None
+        except Exception as exc:
+            err = str(exc)
+            log.warning("Feed failed: %s %s (%s)", name, url, exc)
+    return name, [], err
 
 
 def dedupe(stories: list[dict]) -> list[dict]:
@@ -249,7 +299,7 @@ def dedupe(stories: list[dict]) -> list[dict]:
 @st.cache_data(ttl=NEWS_REFRESH, show_spinner=False)
 def load_news():
     stories, failed = [], []
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=8) as pool:
         for name, entries, err in pool.map(fetch_feed, SOURCES.items()):
             failed += [name] if err else []
             stories += [s for s in (build_story(e, name) for e in entries) if s]
@@ -430,8 +480,24 @@ button{{min-height:44px;border-radius:12px!important}}
 .stat .v{{font-size:1.3rem;font-weight:700;line-height:1.3}}
 .stat .d{{font-size:.8rem;font-weight:600}}
 .stat .d.up{{color:#4ade80}}.stat .d.dn{{color:#f87171}}
+.px-head{{margin:.2rem 0 .6rem}}
+.px-name{{font-size:1.25rem;font-weight:700}}
+.px-sec{{font-size:.8rem;opacity:.7;margin-bottom:.2rem}}
+.px-row{{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 14px}}
+.px-price{{font-size:2rem;font-weight:800;line-height:1.2}}
+.px-chg{{font-size:1rem;font-weight:700}}
+.px-chg.up{{color:#4ade80}}.px-chg.dn{{color:#f87171}}
+.px-sub{{font-size:.76rem;opacity:.65}}
+.ftab{{display:grid;grid-template-columns:1fr 1fr;column-gap:32px;margin:.2rem 0 .8rem}}
+.fr{{display:flex;justify-content:space-between;gap:12px;padding:10px 2px;border-bottom:1px solid rgba(255,255,255,.09);font-size:.92rem}}
+.fr .k{{opacity:.72}}.fr .v{{font-weight:600;text-align:right}}
+.rb{{margin:.4rem 0 1rem}}
+.rb .ends{{display:flex;justify-content:space-between;font-size:.8rem;opacity:.9;line-height:1.35}}
+.rb .track{{position:relative;height:6px;border-radius:99px;background:linear-gradient(90deg,#ef4444,#f59e0b,#22c55e);margin:8px 0 2px}}
+.rb .dot{{position:absolute;top:-5px;width:16px;height:16px;border-radius:50%;background:#fff;border:3px solid #0a0f1f;transform:translateX(-50%);box-sizing:border-box}}
 @media (max-width:640px){{.hero-title{{font-size:1.25rem;letter-spacing:.06em}}.brand img{{height:56px!important;width:56px!important}}
-.block-container{{padding-left:.9rem;padding-right:.9rem}}.stat-grid{{grid-template-columns:repeat(2,1fr)}}.stat .v{{font-size:1.1rem}}}}
+.block-container{{padding-left:.9rem;padding-right:.9rem}}.stat-grid{{grid-template-columns:repeat(2,1fr)}}.stat .v{{font-size:1.1rem}}
+.ftab{{grid-template-columns:1fr}}.px-price{{font-size:1.6rem}}}}
 @media (prefers-reduced-motion:reduce){{.stApp::before{{animation:none}}div[class*="st-key-card_"]{{transition:none}}}}
 </style>""", unsafe_allow_html=True)
 
@@ -486,6 +552,8 @@ def mood_bar(rows: list) -> None:
 def init_state() -> None:
     for k, v in {"query": "", "today_only": False, "sources": list(SOURCES)}.items():
         st.session_state.setdefault(k, v)
+    # drop any source that is no longer in the trusted list (a visitor's old session may still hold it)
+    st.session_state["sources"] = [s for s in st.session_state["sources"] if s in SOURCES]
 
 
 def reset_filters() -> None:
@@ -557,12 +625,18 @@ def movers_tab(rows: list, stories: list[dict]) -> None:
         st.button("🔄 Try again", on_click=refresh_all, key="retry_prices")
         return
     shown = rows[:6] + rows[-6:]
-    fig = go.Figure(go.Bar(x=[r[3] for r in shown][::-1], y=[r[0] for r in shown][::-1], orientation="h",
-                           marker_color=["#22c55e" if r[3] >= 0 else "#ef4444" for r in shown][::-1],
-                           text=[f"{r[3]:+.2f}%" for r in shown][::-1], textposition="outside",
+    vals = [r[3] for r in shown]
+    span = max(abs(v) for v in vals) or 1
+    fig = go.Figure(go.Bar(x=vals[::-1], y=[r[0] for r in shown][::-1], orientation="h", cliponaxis=False,
+                           marker_color=["#22c55e" if v >= 0 else "#ef4444" for v in vals][::-1],
+                           text=[f"{v:+.2f}%" for v in vals][::-1], textposition="outside",
                            hovertemplate="%{y}: %{x:+.2f}%<extra></extra>"))
-    fig.update_layout(height=440, margin=dict(l=0, r=30, t=10, b=0), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+    fig.update_layout(height=440, margin=dict(l=0, r=10, t=10, b=0), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                       font_color="#e5e7eb", xaxis_title="% change vs previous close", dragmode=False)
+    # leave room on both sides so the % labels at the end of long bars are never cut off
+    fig.update_xaxes(range=[min(0, min(vals)) - span * 0.3, max(0, max(vals)) + span * 0.3], zeroline=True,
+                     zerolinecolor="rgba(255,255,255,.35)")
+    fig.update_yaxes(automargin=True)
     st.plotly_chart(fig, **PLOT_KW, config={"displayModeBar": False})
     g, l = st.columns(2)
     g.subheader("🟢 Top gainers")
@@ -576,14 +650,16 @@ def movers_tab(rows: list, stories: list[dict]) -> None:
 
 
 # ------------------------------------------------------- company deep-dive
-RANGES = {"1D": ("1d", "5m"), "5D": ("5d", "15m"), "1M": ("1mo", "1d"),
+RANGES = {"1D": ("1d", "5m"), "1W": ("5d", "15m"), "1M": ("1mo", "1d"), "3M": ("3mo", "1d"),
           "6M": ("6mo", "1d"), "1Y": ("1y", "1d"), "5Y": ("5y", "1wk")}
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_ohlc(ticker: str, period: str, interval: str):
     try:
-        df = yf.Ticker(ticker).history(period=period, interval=interval)[["Open", "High", "Low", "Close"]].dropna()
+        df = yf.Ticker(ticker).history(period=period, interval=interval)[["Open", "High", "Low", "Close", "Volume"]]
+        df = df.dropna(subset=["Open", "High", "Low", "Close"])
+        df["Volume"] = df["Volume"].fillna(0)
         return df if len(df) > 1 else None
     except Exception as exc:
         log.warning("History failed for %s: %s", ticker, exc)
@@ -603,7 +679,7 @@ def big_moves(df, weekly: bool) -> list[tuple]:
 
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
 def move_headline(name: str, day: str):
-    """Top news result about a company around a given date (Google News search by date)."""
+    """Top news result about a company around a given date, from a trusted publisher only (Google News search by date)."""
     d = datetime.strptime(day, "%Y-%m-%d").date()
     query = f'"{name}" (shares OR stock OR results) after:{d - timedelta(days=1)} before:{d + timedelta(days=2)}'
     url = "https://news.google.com/rss/search?" + urllib.parse.urlencode(
@@ -611,12 +687,12 @@ def move_headline(name: str, day: str):
     try:
         resp = requests.get(url, headers=HEADERS, timeout=8)
         resp.raise_for_status()
-        for entry in feedparser.parse(resp.content).entries[:1]:
+        for entry in feedparser.parse(resp.content).entries[:12]:
             title, publisher = clean_text(entry.get("title", "")), ""
             if " - " in title:
                 title, publisher = title.rsplit(" - ", 1)
-            if title and entry.get("link"):
-                return {"title": title, "publisher": publisher, "link": entry["link"]}
+            if title and entry.get("link") and trusted_publisher(publisher):
+                return {"title": title, "publisher": publisher.strip(), "link": entry["link"]}
     except Exception as exc:
         log.warning("Move headline failed (%s, %s): %s", name, day, exc)
     return None
@@ -625,7 +701,7 @@ def move_headline(name: str, day: str):
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_fundamentals(ticker: str) -> dict:
     keys = ("trailingPE", "forwardPE", "priceToBook", "debtToEquity", "returnOnEquity", "profitMargins", "marketCap",
-            "fiftyTwoWeekHigh", "fiftyTwoWeekLow", "dividendRate", "trailingEps", "sector", "industry")
+            "fiftyTwoWeekHigh", "fiftyTwoWeekLow", "dividendRate", "trailingEps", "bookValue", "sector", "industry")
     out: dict = {}
     try:
         tk = yf.Ticker(ticker)
@@ -642,8 +718,31 @@ def load_fundamentals(ticker: str) -> dict:
     return out
 
 
+@st.cache_data(ttl=PRICE_REFRESH, show_spinner=False)
+def load_day_stats(ticker: str) -> dict:
+    """Today's open, high, low, previous close and volume (refreshed often, unlike the yearly numbers)."""
+    out: dict = {}
+    try:
+        fi = yf.Ticker(ticker).fast_info
+    except Exception:
+        return out
+    for key, fast_key in (("dayHigh", "day_high"), ("dayLow", "day_low"), ("open", "open"),
+                          ("prevClose", "previous_close"), ("volume", "last_volume")):
+        try:
+            v = float(fi[fast_key])
+            if v == v:  # skip NaN
+                out[key] = v
+        except Exception:
+            pass
+    return out
+
+
 def _num(v, suffix: str = "", digits: int = 1) -> str:
     return "—" if v is None else f"{v:,.{digits}f}{suffix}"
+
+
+def _rs(v, digits: int = 2) -> str:
+    return "—" if v is None else f"₹{v:,.{digits}f}"
 
 
 def _crore(v) -> str:
@@ -653,55 +752,107 @@ def _crore(v) -> str:
     return f"₹{cr / 1e5:,.2f} lakh cr" if cr >= 1e5 else f"₹{cr:,.0f} cr"
 
 
-def analysis_card(price: float, f: dict) -> None:
-    st.markdown("**📊 Quick analysis**")
-    if not f:
+def _volume(v) -> str:
+    if not v:
+        return "—"
+    return f"{v / 1e7:,.2f} cr" if v >= 1e7 else f"{v / 1e5:,.2f} lakh" if v >= 1e5 else f"{v:,.0f}"
+
+
+def info_table(items: list[tuple]) -> None:
+    """Clean two-column table like Groww/Zerodha: label on the left, value on the right. items = (label, value, tooltip)."""
+    cells = "".join(f'<div class="fr" title="{html.escape(tip, quote=True)}"><span class="k">{html.escape(k)}</span>'
+                    f'<span class="v">{html.escape(v)}</span></div>' for k, v, tip in items)
+    st.markdown(f'<div class="ftab">{cells}</div>', unsafe_allow_html=True)
+
+
+def range_bar(lo_label: str, hi_label: str, lo, hi, price) -> str:
+    """A low-to-high bar with a dot showing where the price is now."""
+    if not (lo and hi and hi > lo and price):
+        return ""
+    pos = min(max((price - lo) / (hi - lo), 0.0), 1.0) * 100
+    return (f'<div class="rb"><div class="ends"><span>{html.escape(lo_label)}<br><b>₹{lo:,.2f}</b></span>'
+            f'<span style="text-align:right">{html.escape(hi_label)}<br><b>₹{hi:,.2f}</b></span></div>'
+            f'<div class="track"><i class="dot" style="left:{pos:.1f}%"></i></div></div>')
+
+
+def analysis_card(price: float, f: dict, day: dict) -> None:
+    if not f and not day:
         st.info("Company numbers aren't available right now. Please try again in a few minutes.")
         return
+    st.markdown("**📈 Performance**")
+    bars = (range_bar("Today's low", "Today's high", day.get("dayLow"), day.get("dayHigh"), price)
+            + range_bar("52-week low", "52-week high", f.get("fiftyTwoWeekLow"), f.get("fiftyTwoWeekHigh"), price))
+    if bars:
+        st.markdown(bars, unsafe_allow_html=True)
+    info_table([
+        ("Open", _rs(day.get("open")), "The price at which the share started trading today."),
+        ("Prev. close", _rs(day.get("prevClose")), "The price at which the share closed on the previous trading day."),
+        ("Volume", _volume(day.get("volume")), "How many shares have changed hands today."),
+        ("Market cap", _crore(f.get("marketCap")), "The total value of the company on the stock market."),
+    ])
+
     de, roe, pm = f.get("debtToEquity"), f.get("returnOnEquity"), f.get("profitMargins")
     de = de / 100 if de is not None else None      # Yahoo gives debt/equity as a percentage
-    roe = roe * 100 if roe is not None else None
+    roe = roe * 100 if roe is not None else None   # Yahoo gives ROE and margin as fractions (0.15 = 15%)
     pm = pm * 100 if pm is not None else None
     dy = f["dividendRate"] / price * 100 if f.get("dividendRate") and price else None
-    eps = f.get("trailingEps")
-    stat_grid([
-        ("Market cap", _crore(f.get("marketCap")), None, "The total value of the company on the stock market."),
-        ("P/E ratio", _num(f.get("trailingPE"), "x"), None,
+    st.markdown("**📋 Fundamentals**")
+    info_table([
+        ("P/E ratio", _num(f.get("trailingPE"), "x"),
          "Share price divided by yearly profit per share. A P/E of 20 means investors pay Rs 20 for every Rs 1 of yearly profit. Compare it with similar companies."),
-        ("Price to book", _num(f.get("priceToBook"), "x", 2), None,
+        ("P/B ratio", _num(f.get("priceToBook"), "x", 2),
          "Share price compared with the company's book value (assets minus debts) per share."),
-        ("Debt to equity", _num(de, "x", 2), None,
+        ("EPS (yearly)", _rs(f.get("trailingEps")), "Profit earned per share over the last year."),
+        ("Book value", _rs(f.get("bookValue")), "The company's net worth (assets minus debts) per share."),
+        ("Debt to equity", _num(de, "x", 2),
          "How much the company has borrowed for every Rs 1 of its own money. Lower usually means less risk. Not meaningful for banks."),
-        ("Return on equity", _num(roe, "%"), None,
-         "Profit earned on shareholders' money. Higher usually means the company uses money well."),
-        ("Profit margin", _num(pm, "%"), None, "The share of sales the company keeps as profit."),
-        ("Dividend yield", _num(dy, "%", 2), None, "Yearly dividend as a percentage of the share price."),
-        ("EPS (yearly)", "—" if eps is None else f"₹{eps:,.2f}", None, "Profit earned per share over the last year."),
+        ("Return on equity", _num(roe, "%"), "Profit earned on shareholders' money. Higher usually means the company uses money well."),
+        ("Profit margin", _num(pm, "%"), "The share of sales the company keeps as profit."),
+        ("Dividend yield", _num(dy, "%", 2), "Yearly dividend as a percentage of the share price."),
     ])
-    lo, hi = f.get("fiftyTwoWeekLow"), f.get("fiftyTwoWeekHigh")
-    if lo and hi and hi > lo and price:
-        st.caption(f"52-week range: ₹{lo:,.2f} (low) to ₹{hi:,.2f} (high)")
-        st.progress(float(min(max((price - lo) / (hi - lo), 0.0), 1.0)))
-    if f.get("sector"):
-        st.caption(f"Sector: {f['sector']}" + (f" · {f['industry']}" if f.get("industry") else ""))
     with st.expander("How to read these numbers"):
         st.markdown("- **P/E**: lower can mean cheaper, higher can mean investors expect growth. Compare within the same industry.\n"
                     "- **Debt to equity**: above 1 means more borrowed money than own money (normal for banks and finance firms).\n"
                     "- **Return on equity**: 15% or more is often seen as good.\n"
-                    "- **52-week bar**: the closer to the right, the closer the price is to its yearly high.")
+                    "- **Range bars**: the closer the dot is to the right, the closer the price is to its high.")
     st.caption("Numbers come from Yahoo Finance and can be missing or out of date. They are for learning, not advice to buy or sell.")
 
 
-def build_chart(df, name: str, kind: str, intraday: bool, moves: list, heads: dict):
-    up = float(df["Close"].iloc[-1]) >= float(df["Close"].iloc[0])
-    color, fill = ("#22c55e", "rgba(34,197,94,.12)") if up else ("#ef4444", "rgba(239,68,68,.12)")
-    when = "%{x|%d %b %H:%M}" if intraday else "%{x|%d %b %Y}"
+def _breaks(df, interval: str, intraday: bool) -> list[dict]:
+    """Hide weekends, non-trading hours and market holidays so the chart has no empty gaps."""
+    breaks = [dict(bounds=["sat", "mon"])]
+    if intraday:
+        breaks.append(dict(bounds=[15.5, 9.25], pattern="hour"))
+    elif interval == "1d":
+        have = set(df.index.date)
+        missing = [d.strftime("%Y-%m-%d") for d in pd.bdate_range(df.index[0].date(), df.index[-1].date()) if d.date() not in have]
+        if missing:
+            breaks.append(dict(values=missing))
+    return breaks
+
+
+def build_chart(df, name: str, kind: str, intraday: bool, interval: str, moves: list, heads: dict,
+                ref: float, show_vol: bool, smas: set):
+    up = float(df["Close"].iloc[-1]) >= ref
+    color, fill = ("#22c55e", "rgba(34,197,94,.14)") if up else ("#ef4444", "rgba(239,68,68,.14)")
+    fig = make_subplots(rows=2 if show_vol else 1, cols=1, shared_xaxes=True, vertical_spacing=0.03,
+                        row_heights=[0.78, 0.22] if show_vol else [1.0])
     if kind == "Candles":
-        fig = go.Figure(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
-                                       increasing_line_color="#22c55e", decreasing_line_color="#ef4444", name=name))
+        fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
+                                     increasing_line_color="#22c55e", decreasing_line_color="#ef4444",
+                                     name=name, showlegend=False), row=1, col=1)
+        hi_s, lo_s = df["High"], df["Low"]
     else:
-        fig = go.Figure(go.Scatter(x=df.index, y=df["Close"], mode="lines", name=name, line=dict(color=color, width=2.5),
-                                   fill="tozeroy", fillcolor=fill, hovertemplate=f"{when}: ₹%{{y:,.2f}}<extra></extra>"))
+        fig.add_trace(go.Scatter(x=df.index, y=df["Close"], mode="lines", name="Price", showlegend=False,
+                                 line=dict(color=color, width=2.2), fill="tozeroy", fillcolor=fill,
+                                 hovertemplate="Price ₹%{y:,.2f}<extra></extra>"), row=1, col=1)
+        fig.add_hline(y=ref, line_dash="dot", line_color="rgba(148,163,184,.55)", line_width=1, row=1, col=1)
+        hi_s, lo_s = df["Close"], df["Close"]
+    for n, col in ((20, "#f59e0b"), (50, "#60a5fa")):
+        if n in smas and len(df) > n:
+            fig.add_trace(go.Scatter(x=df.index, y=df["Close"].rolling(n).mean(), mode="lines", name=f"SMA {n}",
+                                     line=dict(color=col, width=1.4), hovertemplate=f"SMA {n} ₹%{{y:,.2f}}<extra></extra>"),
+                          row=1, col=1)
     if moves:
         text = []
         for ts, _, pct in moves:
@@ -710,19 +861,29 @@ def build_chart(df, name: str, kind: str, intraday: bool, moves: list, heads: di
             if head:
                 line += "<br>" + textwrap.fill(head["title"], 42).replace("\n", "<br>")
             text.append(line)
-        fig.add_trace(go.Scatter(x=[m[0] for m in moves], y=[m[1] for m in moves], mode="markers", showlegend=False,
+        fig.add_trace(go.Scatter(x=[m[0] for m in moves], y=[m[1] for m in moves], mode="markers", showlegend=False, name="Big move",
                                  marker=dict(size=13, symbol="diamond", line=dict(width=1.5, color="white"),
                                              color=["#22c55e" if m[2] > 0 else "#ef4444" for m in moves]),
-                                 text=text, hovertemplate="%{text}<extra></extra>"))
-    lo, hi = float(df["Low"].min()), float(df["High"].max())
-    pad = (hi - lo) * 0.06 or 1
-    breaks = [dict(bounds=["sat", "mon"])]
-    if intraday:
-        breaks.append(dict(bounds=[15.5, 9.25], pattern="hour"))
-    fig.update_xaxes(rangebreaks=breaks, rangeslider_visible=False)
-    fig.update_yaxes(range=[lo - pad, hi + pad])
-    fig.update_layout(height=340, margin=dict(l=0, r=0, t=10, b=0), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                      font_color="#e5e7eb", dragmode=False, hovermode="closest" if moves else "x", hoverdistance=40)
+                                 text=text, hovertemplate="%{text}<extra></extra>"), row=1, col=1)
+    if show_vol:
+        vcol = ["rgba(34,197,94,.55)" if c >= o else "rgba(239,68,68,.55)" for o, c in zip(df["Open"], df["Close"])]
+        fig.add_trace(go.Bar(x=df.index, y=df["Volume"], marker_color=vcol, name="Volume", showlegend=False,
+                             hovertemplate="Volume %{y:,.0f}<extra></extra>"), row=2, col=1)
+        fig.update_yaxes(showgrid=False, side="right", tickformat=".2s", row=2, col=1)
+    hi, lo = float(hi_s.max()), float(lo_s.min())
+    for ts, val, ay in ((hi_s.idxmax(), hi, -24), (lo_s.idxmin(), lo, 24)):
+        fig.add_annotation(x=ts, y=val, text=f"₹{val:,.2f}", showarrow=True, arrowhead=0, ax=0, ay=ay,
+                           arrowcolor="rgba(148,163,184,.8)", font=dict(size=11, color="#e5e7eb"), row=1, col=1)
+    pad = (hi - lo) * 0.09 or 1
+    fig.update_xaxes(rangebreaks=_breaks(df, interval, intraday), rangeslider_visible=False, showgrid=False,
+                     showspikes=True, spikemode="across", spikesnap="cursor", spikethickness=1, spikedash="dot",
+                     spikecolor="#94a3b8", hoverformat="%d %b %Y, %I:%M %p" if intraday else "%d %b %Y")
+    fig.update_yaxes(range=[lo - pad, hi + pad], side="right", showgrid=True, gridcolor="rgba(255,255,255,.07)",
+                     tickprefix="₹", zeroline=False, row=1, col=1)
+    fig.update_layout(height=440 if show_vol else 360, margin=dict(l=0, r=0, t=8, b=0), paper_bgcolor="rgba(0,0,0,0)",
+                      plot_bgcolor="rgba(0,0,0,0)", font_color="#e5e7eb", dragmode=False, hovermode="x unified",
+                      hoverlabel=dict(bgcolor="#111827", font_color="#f9fafb"), showlegend=bool(smas),
+                      legend=dict(orientation="h", y=1.04, x=0))
     return fig
 
 
@@ -730,14 +891,27 @@ def company_explorer(rows: list, stories: list[dict]) -> None:
     st.subheader("🔍 Explore a company")
     pick = st.selectbox("Search or pick a company", [r[0] for r in rows], key="explore")
     row = next(r for r in rows if r[0] == pick)
-    ticker, price = row[1], row[2]
-    stat_grid([(pick, f"₹{price:,.2f}", row[3], "Latest price and change versus the previous close.")])
+    ticker, price, day_pct = row[1], row[2], row[3]
+    with st.spinner("Loading company numbers…"):
+        fund, day = load_fundamentals(ticker), load_day_stats(ticker)
 
-    left, right = st.columns([3, 2])
-    rng = left.pills("Time range", list(RANGES), selection_mode="single", default="1M", key="range",
-                     label_visibility="collapsed") or "1M"
-    kind = right.pills("Chart type", ["Line", "Candles"], selection_mode="single", default="Line", key="ctype",
-                       label_visibility="collapsed") or "Line"
+    # Groww-style header: name, big price and today's change in rupees and percent
+    prev = price / (1 + day_pct / 100) if day_pct > -99 else price
+    cls, arrow = ("up", "▲") if day_pct >= 0 else ("dn", "▼")
+    sector = " · ".join(x for x in (fund.get("sector"), fund.get("industry")) if x)
+    st.markdown(f'<div class="px-head"><div class="px-name">{html.escape(pick)}</div>'
+                + (f'<div class="px-sec">{html.escape(sector)}</div>' if sector else "")
+                + f'<div class="px-row"><span class="px-price">₹{price:,.2f}</span>'
+                f'<span class="px-chg {cls}">{arrow} {price - prev:+,.2f} ({day_pct:+.2f}%)</span></div>'
+                '<div class="px-sub">1 day change vs previous close</div></div>', unsafe_allow_html=True)
+
+    rng = st.pills("Time range", list(RANGES), selection_mode="single", default="1M", key="range",
+                   label_visibility="collapsed") or "1M"
+    left, right = st.columns([1, 2])
+    kind = left.pills("Chart type", ["Line", "Candles"], selection_mode="single", default="Line", key="ctype",
+                      label_visibility="collapsed") or "Line"
+    ind = right.pills("Indicators", ["Volume", "SMA 20", "SMA 50"], selection_mode="multi", default=["Volume"], key="ind",
+                      label_visibility="collapsed") or []
     period, interval = RANGES[rng]
     df = load_ohlc(ticker, period, interval)
     if df is None:
@@ -749,9 +923,16 @@ def company_explorer(rows: list, stories: list[dict]) -> None:
         if moves:
             with st.spinner("Looking up why it moved…"):
                 heads = {m[0]: move_headline(pick, m[0].strftime("%Y-%m-%d")) for m in moves}
-        st.plotly_chart(build_chart(df, pick, kind, intraday, moves, heads), **PLOT_KW, config={"displayModeBar": False})
         first, last = float(df["Close"].iloc[0]), float(df["Close"].iloc[-1])
-        stat_grid([(f"{rng} change", f"{(last / first - 1) * 100:+.2f}%", None, "Price change over the selected range."),
+        ref = prev if rng == "1D" else first  # dotted baseline: previous close for 1D, start of range otherwise
+        fig = build_chart(df, pick, kind, intraday, interval, moves, heads, ref,
+                          "Volume" in ind, {int(i.split()[1]) for i in ind if i.startswith("SMA")})
+        st.plotly_chart(fig, **PLOT_KW, config={"displayModeBar": False})
+        # 1D uses the same previous-close figure as the header, so the two percentages always agree
+        r_pct = day_pct if rng == "1D" else (last / first - 1) * 100
+        r_chg = (price - prev) if rng == "1D" else last - first
+        stat_grid([(f"{rng} return", f"{'+' if r_chg >= 0 else '−'}₹{abs(r_chg):,.2f}", r_pct,
+                    "Price change over the selected range."),
                    (f"{rng} high", f"₹{df['High'].max():,.2f}", None, "Highest price in this range."),
                    (f"{rng} low", f"₹{df['Low'].min():,.2f}", None, "Lowest price in this range.")])
         if moves:
@@ -763,15 +944,13 @@ def company_explorer(rows: list, stories: list[dict]) -> None:
                     st.markdown(f"- **{label}**: [{md_safe(head['title'])}]({safe_url(head['link'])})  \n"
                                 f"  <small>{md_safe(head['publisher'])}</small>", unsafe_allow_html=True)
                 else:
-                    st.markdown(f"- **{label}**: no matching headline found")
+                    st.markdown(f"- **{label}**: no matching headline found from a trusted publisher")
             st.caption("Diamonds on the chart mark these days. The headline is the top news result around that date, "
                        "so it may not be the real cause. Please open the article to check.")
         elif not intraday:
             st.caption("No unusually big single moves in this range.")
 
-    with st.spinner("Loading company numbers…"):
-        fund = load_fundamentals(ticker)
-    analysis_card(price, fund)
+    analysis_card(price, fund, day)
 
     related = [s for s in stories if pick in s["tags"]][:3]
     st.markdown("**Latest news on this company**" if related else "No recent headlines mention this company.")
@@ -965,7 +1144,7 @@ def stat_grid(items: list[tuple]) -> None:
     for label, value, pct, tip in items:
         delta = ""
         if pct is not None:
-            delta = f'<div class="d {"up" if pct >= 0 else "dn"}">{"▲" if pct >= 0 else "▼"} {abs(pct):.2f}%</div>'
+            delta = f'<div class="d {"up" if pct >= 0 else "dn"}">{"▲" if pct >= 0 else "▼"} {pct:+.2f}%</div>'
         cells.append(f'<div class="stat" title="{html.escape(tip, quote=True)}"><div class="l">{html.escape(label)}</div>'
                      f'<div class="v">{html.escape(value)}</div>{delta}</div>')
     st.markdown(f'<div class="stat-grid">{"".join(cells)}</div>', unsafe_allow_html=True)
@@ -997,7 +1176,7 @@ def price_bar() -> None:
 @st.fragment(run_every=f"{NEWS_REFRESH}s")
 def news_section() -> None:
     stories, failed, fetched_at = load_news()
-    st.caption(f"News updated {fetched_at:%H:%M:%S} IST · refreshes every {NEWS_REFRESH // 60} min")
+    st.caption(f"News updated {fetched_at:%H:%M:%S} IST · refreshes every {NEWS_REFRESH // 60} min · trusted sources only")
     if failed:
         st.caption(f"⚠️ Some sources did not respond ({', '.join(failed)}). Showing the rest.")
     if not stories:
