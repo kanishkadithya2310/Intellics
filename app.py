@@ -1,11 +1,14 @@
 """Intellics v1.0 beta: Indian markets news, explained simply.
 
-- Animated background (optional photo or looping hero video)
+- Animated background (optional photo)
 - Every article gets a 3-4 sentence plain-English summary (free Groq AI, with an
   automatic no-AI fallback so no article is ever left without one)
-- Prices refresh every few seconds and show the time of the latest data point
-- Top gainers & losers tab with chart, company explorer and related news
-- Financial terms tab: a new term every day
+- Prices refresh every 30 seconds and show the time of the latest data point
+- Top gainers & losers tab with an interactive company explorer (range buttons, candles,
+  "why it moved" headlines on big days, and a quick analysis card: P/E, debt to equity, ROE...)
+- Upcoming dividends, splits and bonus issues
+- 10 financial terms a day (600 unique terms in terms.py, no repeats for 60 days)
+- Works on phones too: responsive cards, and the hero video always shows the whole picture
 """
 from __future__ import annotations
 
@@ -15,30 +18,34 @@ import html
 import json
 import logging
 import re
+import textwrap
 import threading
 import time
+import urllib.parse
+from collections import Counter
 from functools import lru_cache
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, wait
-from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from zoneinfo import ZoneInfo
 
 import feedparser
-import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
 import yfinance as yf
 from PIL import Image
 
+try:
+    from terms import TERMS  # terms.py must sit next to app.py
+except Exception:  # keep the app alive even if the file is missing
+    TERMS = []
+
 # ----------------------------------------------------------------- settings
-VERSION = "1.0 beta"
+VERSION = "1.1 beta"
 NEWS_REFRESH = 120   # seconds between news refreshes
-PRICE_REFRESH = 5     # seconds: Sensex, Nifty, Brent, Gold (4 tickers, a light request)
-COMPANY_REFRESH = 15  # seconds: the ~33 tracked companies (one bigger request)
-MOVERS_REFRESH = 30   # gainers/losers page redraws slower so charts do not flicker while you use them
+PRICE_REFRESH = 30   # seconds between price refreshes (as fast as the free source allows)
 MAX_STORIES = 40
 ORG_NAME = "Intellics Committee"
 ORG_SUBTITLE = "The AI and Data Analytics Committee"
@@ -132,166 +139,6 @@ GLOSSARY = [  # (name, regex, plain meaning)
     ("Intraday", r"intraday", "within a single trading day"),
     ("Circuit limit", r"upper circuit|lower circuit", "the daily limit beyond which a share's price is not allowed to move"),
 ]
-# ------------------------------------------------- Financial terms library
-# Ten new terms per day, in this fixed order, so nothing repeats until all have been shown.
-# To add more: append new lines at the END of the list, in groups of 10 (this keeps past days unchanged).
-START_DATE = date(2026, 10, 8)  # day 1 of the cycle
-TERMS_PER_DAY = 10  # new terms shown every day (keep len(TERMS) a multiple of this)
-TERMS = [  # (term, category, simple meaning, example)
-    ("Mutual fund", "Investing", "A pool of money from many investors, managed by a professional who buys shares, bonds or other assets.", "Priya puts ₹1,000 in a mutual fund instead of picking shares herself."),
-    ("Bid and ask", "Markets", "The bid is the highest price buyers offer; the ask is the lowest price sellers will accept.", "A share shows bid ₹99.90 and ask ₹100.10."),
-    ("Interest rate", "Economy", "The cost of borrowing money, or the reward for saving it, shown as a percentage per year.", "A bank offers 7% a year on a fixed deposit."),
-    ("Revenue vs profit", "Company", "Revenue is all the money a company earns from sales; profit is what is left after paying all costs.", "A cafe sells ₹10 lakh of coffee (revenue) but keeps ₹1 lakh after costs (profit)."),
-    ("SIP", "Investing", "Systematic Investment Plan: investing a fixed amount at regular intervals, usually every month.", "Arjun invests ₹500 on the 5th of every month."),
-    ("Stop-loss", "Markets", "An order that automatically sells a share if its price falls to a level you set, to limit your loss.", "You bought at ₹100 and set a stop-loss at ₹92."),
-    ("Fiscal deficit", "Economy", "When the government spends more than it earns in a year, apart from borrowing.", "If the government earns ₹90 and spends ₹100, the gap of ₹10 is the deficit."),
-    ("Balance sheet", "Company", "A snapshot of what a company owns (assets), what it owes (liabilities) and what is left for its owners.", "It shows the company has ₹50 crore in assets and ₹30 crore in debts."),
-    ("NAV", "Investing", "Net Asset Value: the price of one unit of a mutual fund, based on the value of everything the fund holds.", "A fund with NAV ₹25 means one unit costs ₹25."),
-    ("Limit order", "Markets", "An order to buy or sell only at a price you choose, or better.", "You place a buy order at ₹95 and it fills only if the price drops that low."),
-    ("Recession", "Economy", "A long period when the economy shrinks, often shown by falling GDP for two quarters in a row.", "Jobs get scarce and spending drops during a recession."),
-    ("P/E ratio", "Company", "Price divided by earnings per share: how much investors pay for each rupee of a company's yearly profit.", "A P/E of 20 means investors pay ₹20 for every ₹1 of yearly profit."),
-    ("Diversification", "Investing", "Spreading your money across different investments so one bad performer hurts you less.", "Holding shares, gold and bonds instead of only one stock."),
-    ("Short selling", "Markets", "Selling borrowed shares in the hope of buying them back later at a lower price.", "You sell at ₹100, the price falls to ₹80, you buy back and keep the ₹20 gap."),
-    ("Exchange rate", "Economy", "The price of one currency in terms of another.", "If ₹85 buys one US dollar, that is the rupee-dollar exchange rate."),
-    ("Stock split", "Company", "A company divides each share into more shares. The price per share drops, but your total value stays the same.", "A 1-for-2 split turns one ₹1,000 share into two ₹500 shares."),
-    ("Compounding", "Investing", "Earning returns on your earlier returns, so your money grows faster over time.", "₹1,000 at 10% becomes ₹1,100, then ₹1,210 the next year."),
-    ("Trading volume", "Markets", "The number of shares traded in a period. High volume means lots of buying and selling activity.", "5 lakh shares changed hands today, more than usual."),
-    ("Monetary policy", "Economy", "Steps the central bank (RBI) takes, such as changing interest rates, to control prices and support growth.", "The RBI raises rates to slow rising prices."),
-    ("Net profit margin", "Company", "The percentage of sales a company keeps as profit after all costs.", "Earning ₹10 profit on ₹100 of sales is a 10% margin."),
-    ("Blue-chip stock", "Investing", "A share of a large, well-established, financially strong company with a long record.", "Big household-name companies are often called blue chips."),
-    ("Market order", "Markets", "An order to buy or sell right away at the best price available.", "You tap Buy and the order fills at the current price."),
-    ("Trade deficit", "Economy", "When a country buys more goods from the world (imports) than it sells (exports).", "India imports ₹100 of goods and exports ₹80, so the deficit is ₹20."),
-    ("EPS", "Company", "Earnings per share: a company's profit divided by its number of shares.", "A ₹100 crore profit across 10 crore shares is ₹10 EPS."),
-    ("Index fund", "Investing", "A fund that simply copies an index such as the Nifty 50, usually with low fees.", "An index fund buys all 50 Nifty companies in the same proportion."),
-    ("Futures", "Markets", "A contract to buy or sell something at a fixed price on a future date.", "A trader agrees today to buy crude oil at a set price in two months."),
-    ("Forex reserves", "Economy", "Foreign currency and gold held by a country's central bank to pay for imports and steady the currency.", "The RBI sells dollars from its reserves to support the rupee."),
-    ("Buyback", "Company", "A company buys its own shares back from investors, which reduces the number of shares in the market.", "A firm offers ₹1,200 per share to buy back 2% of its shares."),
-    ("ETF", "Investing", "Exchange Traded Fund: a basket of investments that you can buy and sell on the stock exchange like a share.", "A gold ETF lets you hold gold without buying coins."),
-    ("Options", "Markets", "A contract that gives you the right, but not the duty, to buy or sell at a set price before a date.", "You pay a small fee for the right to buy a share at ₹100 next month."),
-    ("CRR", "Economy", "Cash Reserve Ratio: the share of deposits that banks must keep with the RBI as cash.", "If CRR is 4%, a bank with ₹100 deposits keeps ₹4 with the RBI."),
-    ("Debt-to-equity ratio", "Company", "How much a company has borrowed compared with the money its owners have put in.", "₹60 of debt against ₹40 of owners' money gives a ratio of 1.5."),
-    ("Asset allocation", "Investing", "How you split your money between shares, bonds, gold, cash and other assets.", "60% in shares, 30% in bonds and 10% in gold."),
-    ("Derivative", "Markets", "A financial contract whose value depends on another asset, such as a share, gold or oil.", "Futures and options are derivatives."),
-    ("Credit score", "Economy", "A number (such as the CIBIL score) that shows how reliably you have repaid loans.", "A high score can help you get a loan at a lower rate."),
-    ("Bonus shares", "Company", "Free extra shares a company gives to its existing shareholders.", "A 1:1 bonus gives you one extra share for each share you own."),
-    ("Expense ratio", "Investing", "The yearly fee a mutual fund or ETF charges, as a percentage of your money.", "A 1% expense ratio costs ₹100 a year on ₹10,000 invested."),
-    ("Circuit breaker", "Markets", "A rule that pauses trading or limits price moves when prices swing too far in a day.", "Trading in a share stops for the day after it rises 20%."),
-    ("EMI", "Economy", "Equated Monthly Instalment: the fixed amount you pay every month to repay a loan.", "You repay a bike loan with an EMI of ₹3,000."),
-    ("Rights issue", "Company", "An offer of new shares to existing shareholders, often at a discount, to raise money.", "A company offers one new share for every five you own."),
-    ("Penny stock", "Investing", "A very cheap share of a small company. These are usually risky and hard to sell.", "A ₹2 share with few buyers is a penny stock."),
-    ("Margin trading", "Markets", "Borrowing money from your broker to trade more than you could with your own cash. Losses are bigger too.", "You put in ₹10,000 and trade ₹40,000 worth of shares."),
-    ("Fixed deposit", "Economy", "Money you keep in a bank for a fixed time at a fixed interest rate.", "₹50,000 locked for one year at 7%."),
-    ("Working capital", "Company", "The money a business needs for day-to-day running, such as paying suppliers and salaries.", "A shop needs cash to restock before sales come in."),
-    ("Lock-in period", "Investing", "A time during which you cannot withdraw or sell an investment.", "Some tax-saving funds lock your money for three years."),
-    ("Demat account", "Markets", "An account that holds your shares in electronic form, like a bank account for shares.", "You need a demat account to buy shares online."),
-    ("Stagflation", "Economy", "A bad mix of slow growth, high unemployment and rising prices at the same time.", "Prices keep climbing while jobs get harder to find."),
-    ("Cash flow", "Company", "The money moving into and out of a business over a period.", "A company can show a profit on paper yet run short of cash."),
-    ("Risk appetite", "Investing", "How much loss of value you can accept in return for the chance of higher gains.", "A student with a long horizon may accept more risk than a retiree."),
-    ("Settlement (T+1)", "Markets", "The time a trade takes to complete. T+1 means shares and money change hands one working day after the trade.", "Shares bought on Monday reach your demat account on Tuesday."),
-    ("SLR", "Economy", "Statutory Liquidity Ratio: the share of deposits banks must hold in cash, gold or government bonds.", "A bank holds part of your deposit in safe government bonds."),
-    ("Book value", "Company", "A company's net worth on paper: assets minus liabilities, often shown per share.", "A company worth ₹500 crore on paper with 10 crore shares has a book value of ₹50 per share."),
-    ("Rebalancing", "Investing", "Adjusting your investments back to your planned split after prices have moved.", "Shares grew to 70% of your portfolio, so you sell some to get back to 60%."),
-    ("Spread", "Markets", "The gap between the bid price and the ask price. A smaller gap usually means an easier, cheaper trade.", "Bid ₹99.90 and ask ₹100.10 give a spread of ₹0.20."),
-    ("Deflation", "Economy", "A general fall in prices over time, the opposite of inflation.", "Prices drop for months, so people delay purchases."),
-    ("ROE", "Company", "Return on equity: how much profit a company makes for every rupee of its owners' money.", "₹15 profit on ₹100 of owners' money is a 15% ROE."),
-    ("Dividend yield", "Investing", "The yearly dividend as a percentage of the share price.", "A ₹5 dividend on a ₹100 share is a 5% yield."),
-    ("Index", "Markets", "A number that tracks a group of shares to show how the market is doing, such as the Sensex or Nifty 50.", "The Nifty rising means the 50 big companies are doing well overall."),
-    ("Fiscal policy", "Economy", "The government's decisions on taxes and spending to steer the economy.", "Cutting taxes to boost spending is a fiscal policy move."),
-    ("Promoter holding", "Company", "The percentage of a company's shares held by its founders or owners.", "Founders own 55% of the shares, so promoter holding is 55%."),
-    ("Bull market", "Investing", "A long period when prices rise and investors feel confident.", "Share prices climb for two years straight."),
-    ("Rally", "Markets", "A sharp rise in prices over a short time.", "Banking shares rally after good results."),
-    ("Current account deficit", "Economy", "When a country pays the world more for goods, services and income than it earns from them.", "A high oil import bill widens the deficit."),
-    ("Venture capital", "Company", "Money invested in young, high-growth startups in return for part ownership.", "A fund puts ₹5 crore into a new app company for 20% of it."),
-    ("Bear market", "Investing", "A long period of falling prices, usually a drop of 20% or more from a recent high.", "Shares slide for months and investors turn fearful."),
-    ("Correction", "Markets", "A fall of about 10% or more from a recent high. It is often seen as a healthy pause.", "The index drops 10% after a long climb."),
-    ("Collateral", "Economy", "An asset you pledge to secure a loan. The lender can take it if you do not repay.", "A home is pledged against a home loan."),
-    ("Unicorn", "Company", "A startup valued at more than US$1 billion.", "A food-delivery startup valued at US$2 billion is a unicorn."),
-    ("Volatility", "Investing", "How sharply and how quickly prices move up and down.", "A share that jumps 5% one day and falls 6% the next is volatile."),
-    ("Support and resistance", "Markets", "Price levels where a share has often stopped falling (support) or stopped rising (resistance).", "A share keeps bouncing back up from ₹90."),
-    ("Real return", "Economy", "Your investment return after taking away inflation.", "7% interest with 5% inflation is only about a 2% real return."),
-    ("Bootstrapping", "Company", "Building a business using your own savings and sales, with no outside investors.", "Two friends start a design studio using their own money."),
-    ("Liquidity", "Investing", "How quickly and easily something can be turned into cash without losing value.", "Shares are easier to sell than land, so they are more liquid."),
-    ("Candlestick chart", "Markets", "A price chart where each bar shows the open, high, low and close for a period.", "A green candle means the price closed higher than it opened."),
-    ("Credit rating", "Economy", "A grade that shows how likely a borrower is to repay its debt.", "A company with a top rating can borrow at lower interest."),
-    ("Due diligence", "Company", "Carefully checking the facts and numbers before buying a company or making a big investment.", "Before a takeover, the buyer reviews all accounts and contracts."),
-    ("Large-cap and small-cap", "Investing", "Cap means market value. Large-caps are big, steady companies; small-caps are smaller and riskier.", "A top bank is a large-cap; a young local firm is a small-cap."),
-    ("Arbitrage", "Markets", "Earning a small, low-risk profit from a price difference for the same asset in two places.", "A share costs ₹100.00 on one exchange and ₹100.20 on another."),
-    ("Disinvestment", "Economy", "The government selling part or all of its stake in a public-sector company.", "The government sells 10% of a state-owned company to the public."),
-    ("Goodwill", "Company", "The extra amount paid for a business above the value of its assets, for its brand, customers and reputation.", "A buyer pays ₹120 crore for a firm whose assets are worth ₹100 crore."),
-    ("Hedging", "Investing", "Making a second investment to reduce the risk of loss on the first.", "An exporter locks in an exchange rate to protect against a falling dollar."),
-    ("Insider trading", "Markets", "Trading shares using important information that is not yet public. It is illegal.", "An employee buys shares before announcing the company's takeover."),
-    ("Government bond (G-Sec)", "Economy", "A loan you give to the government in return for regular interest. It is generally considered very safe.", "You buy a 10-year G-Sec paying fixed interest."),
-    ("Hostile takeover", "Company", "When one company tries to buy another against the wishes of its management.", "A buyer goes directly to shareholders to buy their shares."),
-    ("REIT", "Investing", "Real Estate Investment Trust: lets you earn from property, such as offices, by buying units, without buying a building.", "You buy REIT units and receive a share of the rent."),
-    ("Speculation", "Markets", "Taking big risks on short-term price moves, hoping for quick gains, rather than investing for the long term.", "Buying a share only because you expect it to jump tomorrow."),
-    ("Subsidy", "Economy", "Money the government gives to lower the cost of something for people or businesses.", "A subsidy on cooking gas makes it cheaper for households."),
-    ("ESG", "Company", "Environmental, Social and Governance: ways of judging how responsibly a company runs its business.", "Investors favour firms that cut pollution and treat workers fairly."),
-    ("Income statement", "Company", "A report showing a company's sales, costs and profit over a period. It is also called the profit and loss (P&L) account.", "The quarterly results show sales up 8% and profit up 12%."),
-    ("Currency depreciation", "Economy", "When a currency loses value against another. For example, the rupee weakens against the dollar.", "If the rupee falls from ₹84 to ₹86 per dollar, imports cost more."),
-    ("Portfolio", "Investing", "The full collection of investments you hold, such as shares, funds, bonds and gold.", "Your portfolio has two mutual funds, some shares and a gold bond."),
-    ("Capital gains", "Investing", "The profit you make when you sell an investment for more than you paid. It is taxed.", "You buy at ₹100 and sell at ₹130, so your capital gain is ₹30."),
-    ("Rupee cost averaging", "Investing", "Investing a fixed amount regularly, so you buy more units when prices are low and fewer when they are high.", "₹1,000 buys 10 units at ₹100 but 20 units at ₹50."),
-    ("Exit load", "Investing", "A fee some mutual funds charge if you sell units too soon after buying.", "A fund charges 1% if you withdraw within one year."),
-    ("Direct vs regular plan", "Investing", "A direct plan is bought straight from the fund house with a lower fee; a regular plan goes through a distributor who is paid a commission.", "The same fund has a lower expense ratio in its direct plan."),
-    ("Benchmark", "Investing", "A standard index used to judge how well a fund or portfolio is doing.", "A large-cap fund is compared with the Nifty 50."),
-    ("Beta", "Investing", "A number showing how much a share moves compared with the market. Above 1 means it swings more than the market.", "A share with beta 1.5 may rise 15% when the market rises 10%."),
-    ("ELSS", "Investing", "Equity Linked Savings Scheme: a mutual fund that invests in shares and has a three-year lock-in. It can help save tax.", "You invest ₹50,000 in an ELSS fund and cannot withdraw for three years."),
-    ("PPF", "Investing", "Public Provident Fund: a government-backed long-term savings scheme with fixed interest and tax benefits.", "You deposit money every year for 15 years and earn government-set interest."),
-    ("Sovereign Gold Bond", "Investing", "A government bond priced in grams of gold. It pays yearly interest and avoids storing physical gold.", "You hold 5 grams of gold on paper and also earn interest."),
-    ("Bonds", "Investing", "A loan you give to a company or government in return for regular interest and your money back on a set date.", "You lend ₹10,000 for five years and receive interest every year."),
-    ("Mid-cap", "Investing", "A company of medium size by market value, between large-caps and small-caps. It can grow faster than large-caps but is riskier.", "A growing manufacturer worth ₹20,000 crore is often a mid-cap."),
-    ("Emergency fund", "Investing", "Money kept safe and easy to reach to cover unexpected costs, usually three to six months of expenses.", "You keep ₹1.5 lakh in a savings account in case of a medical bill."),
-    ("SWP", "Investing", "Systematic Withdrawal Plan: taking a fixed amount out of a mutual fund at regular intervals.", "A retiree withdraws ₹20,000 from a fund every month."),
-    ("Growth vs value investing", "Investing", "Growth investors buy fast-growing companies; value investors buy companies that look cheap compared with their worth.", "One investor buys a fast-growing app firm; another buys a cheap but steady cement company."),
-    ("Call and put options", "Markets", "A call gives you the right to buy at a set price; a put gives you the right to sell at a set price.", "You buy a put option to gain if a share falls."),
-    ("Strike price and premium", "Markets", "The strike price is the fixed price in an options contract; the premium is what you pay to buy the option.", "You pay a ₹5 premium for an option with a strike price of ₹100."),
-    ("Lot size", "Markets", "The fixed number of units you must trade in one futures or options contract.", "A contract with lot size 50 means you trade 50 shares at a time."),
-    ("Expiry", "Markets", "The last date on which a futures or options contract is valid.", "Nifty options expire on a fixed weekday every week."),
-    ("Open interest", "Markets", "The total number of futures or options contracts that are still open and not yet settled.", "Rising open interest means more traders are taking new positions."),
-    ("Intraday trading", "Markets", "Buying and selling the same share within one trading day, so nothing is held overnight.", "You buy at 10 am and sell at 2 pm the same day."),
-    ("Delivery trading", "Markets", "Buying shares and keeping them in your demat account for more than one day.", "You buy shares today and hold them for months."),
-    ("Bulk and block deals", "Markets", "Very large share trades. Bulk deals are reported by exchanges; block deals are big trades done in a special window.", "A fund buys 2 lakh shares of a company in one go."),
-    ("Market depth", "Markets", "A list of the buy and sell orders waiting at different prices for a share.", "Depth shows many buyers at ₹99 and many sellers at ₹101."),
-    ("Gap up and gap down", "Markets", "When a share opens much higher (gap up) or lower (gap down) than its previous close.", "A share closes at ₹100 and opens next day at ₹106."),
-    ("Breakout", "Markets", "When a price moves above a resistance level or below a support level, often on high volume.", "A share stuck near ₹200 for weeks suddenly jumps to ₹215."),
-    ("Moving average", "Markets", "The average price over a set number of days, drawn as a smooth line to show the trend.", "A 50-day moving average smooths out daily ups and downs."),
-    ("RSI", "Markets", "Relative Strength Index: a number from 0 to 100 that traders use to judge if a share has risen or fallen too fast.", "An RSI above 70 is often read as overbought."),
-    ("Upper and lower circuit", "Markets", "The highest and lowest price a share is allowed to reach in one day.", "A share hits its upper circuit and no more buying is allowed at higher prices that day."),
-    ("FII and DII", "Markets", "Foreign Institutional Investors and Domestic Institutional Investors: big organisations that invest in Indian shares, from abroad or from India.", "Mutual funds and insurers are DIIs; overseas funds are FIIs."),
-    ("CPI inflation", "Economy", "Consumer Price Index: tracks how the price of a typical basket of things households buy is changing.", "Rising vegetable and fuel prices push CPI inflation up."),
-    ("WPI", "Economy", "Wholesale Price Index: tracks price changes of goods sold in bulk between businesses.", "A rise in steel and chemical prices lifts WPI."),
-    ("Core inflation", "Economy", "Inflation after removing food and fuel prices, which swing a lot.", "Core inflation shows the steadier price trend."),
-    ("GDP", "Economy", "Gross Domestic Product: the total value of everything a country produces in a period. It shows the size and growth of the economy.", "India's GDP grew 7% over the year."),
-    ("GVA", "Economy", "Gross Value Added: the value of goods and services produced, minus the cost of the materials used to make them.", "A bakery's GVA is its sales minus flour, sugar and power costs."),
-    ("Base effect", "Economy", "When a growth rate looks high or low just because the number from a year ago was unusually low or high.", "Growth looks big after a weak year because the starting point was low."),
-    ("PMI", "Economy", "Purchasing Managers' Index: a survey of businesses. A reading above 50 means activity is growing, below 50 means it is shrinking.", "A manufacturing PMI of 56 suggests factories are busy."),
-    ("IIP", "Economy", "Index of Industrial Production: measures how much factories, mines and power plants are producing.", "A rise in IIP shows industrial output is growing."),
-    ("Money supply", "Economy", "The total amount of money in the economy, such as cash and bank deposits.", "More money chasing the same goods can push prices up."),
-    ("FDI", "Economy", "Foreign Direct Investment: when a foreign company or investor puts money into a business in another country for the long term.", "A foreign carmaker builds a new factory in India."),
-    ("Balance of payments", "Economy", "A record of all money flowing into and out of a country from trade and investments.", "More dollars coming in than going out improves the balance."),
-    ("Yield curve", "Economy", "A line showing interest rates on bonds of different time lengths, from short to long.", "Long-term bonds usually pay more than short-term ones."),
-    ("Quantitative easing", "Economy", "When a central bank creates money to buy bonds, to push down interest rates and boost spending.", "A central bank buys government bonds in large amounts during a crisis."),
-    ("MSP", "Economy", "Minimum Support Price: the lowest price at which the government promises to buy certain crops from farmers.", "The government buys wheat at the MSP if the market price falls below it."),
-    ("GST", "Economy", "Goods and Services Tax: a single indirect tax added to most things we buy, replacing many older taxes.", "A 5% GST on a ₹100 item makes it cost ₹105."),
-    ("IPO", "Company", "Initial Public Offering: the first time a company offers its shares to the public to raise money.", "A startup lists on the stock exchange after its IPO."),
-    ("Anchor investor", "Company", "A big institutional investor that buys shares in an IPO just before it opens to the public.", "Mutual funds invest ₹500 crore as anchors a day before an IPO."),
-    ("Listing gain", "Company", "The profit made if a share lists at a higher price than its IPO price.", "An IPO priced at ₹100 lists at ₹120, a listing gain of 20%."),
-    ("Offer for sale (OFS)", "Company", "When existing shareholders, such as promoters, sell some of their shares to the public through the exchange.", "The government sells part of its stake in a company through an OFS."),
-    ("QIP", "Company", "Qualified Institutional Placement: a listed company raises money by selling new shares to big institutions.", "A company raises ₹1,000 crore from funds through a QIP."),
-    ("YoY and QoQ", "Company", "Year-on-Year compares with the same period last year; Quarter-on-Quarter compares with the previous quarter.", "Profit is up 10% YoY but down 3% QoQ."),
-    ("EBITDA", "Company", "Earnings before interest, tax, depreciation and amortisation: profit from core operations before such costs.", "A firm with ₹200 crore EBITDA earns that from its main business."),
-    ("Operating margin", "Company", "The percentage of sales left as profit after the costs of running the business, before interest and tax.", "₹15 of operating profit on ₹100 of sales is a 15% margin."),
-    ("Free cash flow", "Company", "The cash left after a company pays for its operations and for investing in equipment and buildings.", "A company with ₹80 crore free cash flow can pay dividends or reduce debt."),
-    ("Capex", "Company", "Capital expenditure: money a company spends on long-lasting assets such as factories and machines.", "A steel maker spends ₹2,000 crore on a new plant."),
-    ("Promoter pledge", "Company", "When a company's owners use their shares as security to borrow money. A high pledge can be a warning sign.", "Founders pledge 30% of their shares to a lender."),
-    ("Demerger", "Company", "When a company splits one of its businesses into a separate company, with its own shares.", "A group separates its finance arm into a new listed company."),
-    ("Dividend payout ratio", "Company", "The share of a company's profit that is paid out to shareholders as dividends.", "Paying ₹30 out of ₹100 profit is a 30% payout ratio."),
-    ("Consolidated vs standalone", "Company", "Standalone results show only the parent company; consolidated results include its subsidiaries too.", "Consolidated sales are higher because they add the subsidiaries' sales."),
-    ("Order book", "Company", "The value of confirmed orders a company has received but not yet completed or delivered.", "A construction firm has an order book of ₹10,000 crore."),
-]
-assert len({t[0] for t in TERMS}) == len(TERMS), "duplicate term in TERMS"
-
-
 SYSTEM_PROMPT = (
     "You explain Indian business news to students from any background (MBA, BBA, arts). "
     "For each story write a summary of 3 to 4 short sentences in very simple English, as if explaining to a friend. "
@@ -489,8 +336,8 @@ def _fast_info(ticker: str):
     return ticker, (last, (last / prev - 1) * 100)
 
 
-def _fetch_prices(tickers: tuple[str, ...]) -> dict[str, tuple[float, float]]:
-    """ticker -> (latest price, % change vs previous close), straight from Yahoo."""
+@st.cache_data(ttl=PRICE_REFRESH, show_spinner=False)
+def load_prices(tickers: tuple[str, ...]) -> dict[str, tuple[float, float]]:
     out: dict = {}
     try:
         df = yf.download(list(tickers), period="7d", interval="1d", group_by="ticker",
@@ -513,41 +360,6 @@ def _fetch_prices(tickers: tuple[str, ...]) -> dict[str, tuple[float, float]]:
     return out
 
 
-@st.cache_resource
-def _last_good() -> dict:
-    return {}
-
-
-def _fetch_with_memory(tickers: tuple[str, ...]) -> dict[str, tuple[float, float]]:
-    """If a quick refresh fails or is throttled, keep showing the last good price (up to 10 min) instead of going blank."""
-    fresh, mem, now = _fetch_prices(tickers), _last_good(), time.time()
-    for t, v in fresh.items():
-        mem[t] = (v, now)
-    return {t: mem[t][0] for t in tickers if t in mem and now - mem[t][1] < 600}
-
-
-@st.cache_data(ttl=PRICE_REFRESH, show_spinner=False)
-def load_index_prices(tickers: tuple[str, ...]):
-    return _fetch_with_memory(tickers)
-
-
-@st.cache_data(ttl=COMPANY_REFRESH, show_spinner=False)
-def load_company_prices(tickers: tuple[str, ...]):
-    return _fetch_with_memory(tickers)
-
-
-def index_tickers() -> tuple[str, ...]:
-    return tuple(INDICES.values())
-
-
-def company_tickers() -> tuple[str, ...]:
-    return tuple(t for t, _ in COMPANIES.values())
-
-
-def get_prices() -> dict[str, tuple[float, float]]:
-    return {**load_company_prices(company_tickers()), **load_index_prices(index_tickers())}
-
-
 def _safe(fn, arg):
     try:
         return fn(arg)
@@ -565,17 +377,20 @@ def load_history(ticker: str):
 
 @st.cache_data(ttl=PRICE_REFRESH, show_spinner=False)
 def load_data_time():
-    """Time of the newest 1-minute price point Yahoo has for Reliance (backup: Nifty). Shows how fresh the data really is."""
-    for symbol in ("RELIANCE.NS", "^NSEI"):
-        try:
-            df = yf.download(symbol, period="1d", interval="1m", progress=False, auto_adjust=False)
-            if len(df):
-                ts = df.index[-1]
-                ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts
-                return ts.tz_convert(IST).to_pydatetime()
-        except Exception as exc:
-            log.warning("Data-time lookup failed for %s: %s", symbol, exc)
+    """Time of the newest 1-minute price point Yahoo has for the Nifty (shows how fresh the data really is)."""
+    try:
+        df = yf.download("^NSEI", period="1d", interval="1m", progress=False, auto_adjust=False)
+        if len(df):
+            ts = df.index[-1]
+            ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts
+            return ts.tz_convert(IST).to_pydatetime()
+    except Exception as exc:
+        log.warning("Data-time lookup failed: %s", exc)
     return None
+
+
+def all_tickers() -> tuple[str, ...]:
+    return tuple(INDICES.values()) + tuple(t for t, _ in COMPANIES.values())
 
 
 def mover_rows(prices: dict) -> list[tuple[str, str, float, float]]:
@@ -609,20 +424,35 @@ div[class*="st-key-card_"]:hover{{transform:translateY(-3px);border-color:rgba(1
 .mood{{height:12px;border-radius:99px;overflow:hidden;background:#ef4444;margin:.3rem 0 .2rem}}
 .mood>div{{height:100%;background:#22c55e;transition:width .6s}}
 button{{min-height:44px;border-radius:12px!important}}
+.stat-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:.4rem 0 .6rem}}
+.stat{{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:14px;padding:10px 12px;backdrop-filter:blur(8px)}}
+.stat .l{{font-size:.74rem;opacity:.72;letter-spacing:.02em}}
+.stat .v{{font-size:1.3rem;font-weight:700;line-height:1.3}}
+.stat .d{{font-size:.8rem;font-weight:600}}
+.stat .d.up{{color:#4ade80}}.stat .d.dn{{color:#f87171}}
+@media (max-width:640px){{.hero-title{{font-size:1.25rem;letter-spacing:.06em}}.brand img{{height:56px!important;width:56px!important}}
+.block-container{{padding-left:.9rem;padding-right:.9rem}}.stat-grid{{grid-template-columns:repeat(2,1fr)}}.stat .v{{font-size:1.1rem}}}}
 @media (prefers-reduced-motion:reduce){{.stApp::before{{animation:none}}div[class*="st-key-card_"]{{transition:none}}}}
 </style>""", unsafe_allow_html=True)
 
 
 def video_background() -> None:
-    """Full-screen looping hero video behind the page. Set VIDEO_URL = "" to switch it off."""
+    """Full-screen looping hero video. Set VIDEO_URL = "" to switch it off.
+    Laptop (wide screen): the video fills the screen.
+    Phone (tall screen): the whole video is shown at the top, so the bull and bear are never cropped."""
     if not VIDEO_URL:
         return
     st.markdown(f"""<style>
 html,body{{background:#0a0f1f}}
 .stApp,[data-testid="stAppViewContainer"],[data-testid="stHeader"]{{background:transparent!important}}
 .stApp::before{{display:none}}
-.hero-video{{position:fixed;top:0;left:0;width:100vw;height:100vh;object-fit:cover;z-index:-1}}
-.hero-overlay{{position:fixed;inset:0;background:rgba(10,15,31,.6);z-index:-1}}
+.hero-video{{position:fixed;top:0;left:0;width:100vw;height:100vh;object-fit:cover;z-index:-1;background:#0a0f1f}}
+.hero-overlay{{position:fixed;inset:0;background:rgba(10,15,31,.55);z-index:-1}}
+@media (max-aspect-ratio:1/1){{
+.hero-video{{object-fit:contain;object-position:center top}}
+.hero-overlay{{background:rgba(10,15,31,.2)}}
+.block-container{{padding-top:calc(56.25vw + 1rem)!important}}
+}}
 </style>
 <video class="hero-video" autoplay loop muted playsinline>
 <source src="{VIDEO_URL}" type="video/mp4"></video>
@@ -664,9 +494,7 @@ def reset_filters() -> None:
 
 def refresh_all() -> None:
     load_news.clear()
-    load_index_prices.clear()
-    load_company_prices.clear()
-    load_data_time.clear()
+    load_prices.clear()
 
 
 def filter_bar() -> None:
@@ -744,23 +572,372 @@ def movers_tab(rows: list, stories: list[dict]) -> None:
             col.metric(name, f"₹{price:,.2f}", f"{pct:+.2f}%")
     st.caption("Change vs previous close, among large NSE companies tracked here. Outside market hours this shows the last session.")
 
+    company_explorer(rows, stories)
+
+
+# ------------------------------------------------------- company deep-dive
+RANGES = {"1D": ("1d", "5m"), "5D": ("5d", "15m"), "1M": ("1mo", "1d"),
+          "6M": ("6mo", "1d"), "1Y": ("1y", "1d"), "5Y": ("5y", "1wk")}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_ohlc(ticker: str, period: str, interval: str):
+    try:
+        df = yf.Ticker(ticker).history(period=period, interval=interval)[["Open", "High", "Low", "Close"]].dropna()
+        return df if len(df) > 1 else None
+    except Exception as exc:
+        log.warning("History failed for %s: %s", ticker, exc)
+        return None
+
+
+def big_moves(df, weekly: bool) -> list[tuple]:
+    """Up to 3 of the biggest single-day (or single-week) moves, only if they are large enough to matter."""
+    ret = df["Close"].pct_change() * 100
+    limit = 6.0 if weekly else 3.0
+    out = []
+    for pos in ret.abs().reset_index(drop=True).nlargest(3).index:
+        if abs(ret.iloc[pos]) >= limit:
+            out.append((df.index[pos], float(df["Close"].iloc[pos]), float(ret.iloc[pos])))
+    return sorted(out, key=lambda m: m[0])
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def move_headline(name: str, day: str):
+    """Top news result about a company around a given date (Google News search by date)."""
+    d = datetime.strptime(day, "%Y-%m-%d").date()
+    query = f'"{name}" (shares OR stock OR results) after:{d - timedelta(days=1)} before:{d + timedelta(days=2)}'
+    url = "https://news.google.com/rss/search?" + urllib.parse.urlencode(
+        {"q": query, "hl": "en-IN", "gl": "IN", "ceid": "IN:en"})
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=8)
+        resp.raise_for_status()
+        for entry in feedparser.parse(resp.content).entries[:1]:
+            title, publisher = clean_text(entry.get("title", "")), ""
+            if " - " in title:
+                title, publisher = title.rsplit(" - ", 1)
+            if title and entry.get("link"):
+                return {"title": title, "publisher": publisher, "link": entry["link"]}
+    except Exception as exc:
+        log.warning("Move headline failed (%s, %s): %s", name, day, exc)
+    return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_fundamentals(ticker: str) -> dict:
+    keys = ("trailingPE", "forwardPE", "priceToBook", "debtToEquity", "returnOnEquity", "profitMargins", "marketCap",
+            "fiftyTwoWeekHigh", "fiftyTwoWeekLow", "dividendRate", "trailingEps", "sector", "industry")
+    out: dict = {}
+    try:
+        tk = yf.Ticker(ticker)
+        info = tk.info or {}
+        out = {k: info[k] for k in keys if info.get(k) is not None}
+        for key, fast_key in (("marketCap", "market_cap"), ("fiftyTwoWeekHigh", "year_high"), ("fiftyTwoWeekLow", "year_low")):
+            if key not in out:  # backup route if the full info call is missing a number
+                try:
+                    out[key] = float(tk.fast_info[fast_key])
+                except Exception:
+                    pass
+    except Exception as exc:
+        log.warning("Fundamentals failed for %s: %s", ticker, exc)
+    return out
+
+
+def _num(v, suffix: str = "", digits: int = 1) -> str:
+    return "—" if v is None else f"{v:,.{digits}f}{suffix}"
+
+
+def _crore(v) -> str:
+    if not v:
+        return "—"
+    cr = v / 1e7
+    return f"₹{cr / 1e5:,.2f} lakh cr" if cr >= 1e5 else f"₹{cr:,.0f} cr"
+
+
+def analysis_card(price: float, f: dict) -> None:
+    st.markdown("**📊 Quick analysis**")
+    if not f:
+        st.info("Company numbers aren't available right now. Please try again in a few minutes.")
+        return
+    de, roe, pm = f.get("debtToEquity"), f.get("returnOnEquity"), f.get("profitMargins")
+    de = de / 100 if de is not None else None      # Yahoo gives debt/equity as a percentage
+    roe = roe * 100 if roe is not None else None
+    pm = pm * 100 if pm is not None else None
+    dy = f["dividendRate"] / price * 100 if f.get("dividendRate") and price else None
+    eps = f.get("trailingEps")
+    stat_grid([
+        ("Market cap", _crore(f.get("marketCap")), None, "The total value of the company on the stock market."),
+        ("P/E ratio", _num(f.get("trailingPE"), "x"), None,
+         "Share price divided by yearly profit per share. A P/E of 20 means investors pay Rs 20 for every Rs 1 of yearly profit. Compare it with similar companies."),
+        ("Price to book", _num(f.get("priceToBook"), "x", 2), None,
+         "Share price compared with the company's book value (assets minus debts) per share."),
+        ("Debt to equity", _num(de, "x", 2), None,
+         "How much the company has borrowed for every Rs 1 of its own money. Lower usually means less risk. Not meaningful for banks."),
+        ("Return on equity", _num(roe, "%"), None,
+         "Profit earned on shareholders' money. Higher usually means the company uses money well."),
+        ("Profit margin", _num(pm, "%"), None, "The share of sales the company keeps as profit."),
+        ("Dividend yield", _num(dy, "%", 2), None, "Yearly dividend as a percentage of the share price."),
+        ("EPS (yearly)", "—" if eps is None else f"₹{eps:,.2f}", None, "Profit earned per share over the last year."),
+    ])
+    lo, hi = f.get("fiftyTwoWeekLow"), f.get("fiftyTwoWeekHigh")
+    if lo and hi and hi > lo and price:
+        st.caption(f"52-week range: ₹{lo:,.2f} (low) to ₹{hi:,.2f} (high)")
+        st.progress(float(min(max((price - lo) / (hi - lo), 0.0), 1.0)))
+    if f.get("sector"):
+        st.caption(f"Sector: {f['sector']}" + (f" · {f['industry']}" if f.get("industry") else ""))
+    with st.expander("How to read these numbers"):
+        st.markdown("- **P/E**: lower can mean cheaper, higher can mean investors expect growth. Compare within the same industry.\n"
+                    "- **Debt to equity**: above 1 means more borrowed money than own money (normal for banks and finance firms).\n"
+                    "- **Return on equity**: 15% or more is often seen as good.\n"
+                    "- **52-week bar**: the closer to the right, the closer the price is to its yearly high.")
+    st.caption("Numbers come from Yahoo Finance and can be missing or out of date. They are for learning, not advice to buy or sell.")
+
+
+def build_chart(df, name: str, kind: str, intraday: bool, moves: list, heads: dict):
+    up = float(df["Close"].iloc[-1]) >= float(df["Close"].iloc[0])
+    color, fill = ("#22c55e", "rgba(34,197,94,.12)") if up else ("#ef4444", "rgba(239,68,68,.12)")
+    when = "%{x|%d %b %H:%M}" if intraday else "%{x|%d %b %Y}"
+    if kind == "Candles":
+        fig = go.Figure(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
+                                       increasing_line_color="#22c55e", decreasing_line_color="#ef4444", name=name))
+    else:
+        fig = go.Figure(go.Scatter(x=df.index, y=df["Close"], mode="lines", name=name, line=dict(color=color, width=2.5),
+                                   fill="tozeroy", fillcolor=fill, hovertemplate=f"{when}: ₹%{{y:,.2f}}<extra></extra>"))
+    if moves:
+        text = []
+        for ts, _, pct in moves:
+            head = heads.get(ts)
+            line = f"{ts:%d %b}: {pct:+.1f}%"
+            if head:
+                line += "<br>" + textwrap.fill(head["title"], 42).replace("\n", "<br>")
+            text.append(line)
+        fig.add_trace(go.Scatter(x=[m[0] for m in moves], y=[m[1] for m in moves], mode="markers", showlegend=False,
+                                 marker=dict(size=13, symbol="diamond", line=dict(width=1.5, color="white"),
+                                             color=["#22c55e" if m[2] > 0 else "#ef4444" for m in moves]),
+                                 text=text, hovertemplate="%{text}<extra></extra>"))
+    lo, hi = float(df["Low"].min()), float(df["High"].max())
+    pad = (hi - lo) * 0.06 or 1
+    breaks = [dict(bounds=["sat", "mon"])]
+    if intraday:
+        breaks.append(dict(bounds=[15.5, 9.25], pattern="hour"))
+    fig.update_xaxes(rangebreaks=breaks, rangeslider_visible=False)
+    fig.update_yaxes(range=[lo - pad, hi + pad])
+    fig.update_layout(height=340, margin=dict(l=0, r=0, t=10, b=0), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                      font_color="#e5e7eb", dragmode=False, hovermode="closest" if moves else "x", hoverdistance=40)
+    return fig
+
+
+def company_explorer(rows: list, stories: list[dict]) -> None:
     st.subheader("🔍 Explore a company")
-    pick = st.selectbox("Pick a company", [r[0] for r in rows], key="explore")
+    pick = st.selectbox("Search or pick a company", [r[0] for r in rows], key="explore")
     row = next(r for r in rows if r[0] == pick)
-    st.metric(pick, f"₹{row[2]:,.2f}", f"{row[3]:+.2f}%")
-    hist = load_history(row[1])
-    if hist is not None and len(hist) > 1:
-        line = go.Figure(go.Scatter(x=hist.index, y=hist.values, mode="lines", line=dict(color="#60a5fa", width=2.5), fill="tozeroy",
-                                    fillcolor="rgba(96,165,250,.12)", hovertemplate="%{x|%d %b}: ₹%{y:,.2f}<extra></extra>"))
-        line.update_layout(height=260, margin=dict(l=0, r=0, t=10, b=0), paper_bgcolor="rgba(0,0,0,0)",
-                           plot_bgcolor="rgba(0,0,0,0)", font_color="#e5e7eb", yaxis=dict(range=[hist.min() * .98, hist.max() * 1.02]))
-        st.caption("Last month's closing price")
-        st.plotly_chart(line, **PLOT_KW, config={"displayModeBar": False})
+    ticker, price = row[1], row[2]
+    stat_grid([(pick, f"₹{price:,.2f}", row[3], "Latest price and change versus the previous close.")])
+
+    left, right = st.columns([3, 2])
+    rng = left.pills("Time range", list(RANGES), selection_mode="single", default="1M", key="range",
+                     label_visibility="collapsed") or "1M"
+    kind = right.pills("Chart type", ["Line", "Candles"], selection_mode="single", default="Line", key="ctype",
+                       label_visibility="collapsed") or "Line"
+    period, interval = RANGES[rng]
+    df = load_ohlc(ticker, period, interval)
+    if df is None:
+        st.info("Price history isn't available for this range right now. Try another range.")
+    else:
+        intraday = interval not in ("1d", "1wk")
+        moves = [] if intraday else big_moves(df, weekly=interval == "1wk")
+        heads: dict = {}
+        if moves:
+            with st.spinner("Looking up why it moved…"):
+                heads = {m[0]: move_headline(pick, m[0].strftime("%Y-%m-%d")) for m in moves}
+        st.plotly_chart(build_chart(df, pick, kind, intraday, moves, heads), **PLOT_KW, config={"displayModeBar": False})
+        first, last = float(df["Close"].iloc[0]), float(df["Close"].iloc[-1])
+        stat_grid([(f"{rng} change", f"{(last / first - 1) * 100:+.2f}%", None, "Price change over the selected range."),
+                   (f"{rng} high", f"₹{df['High'].max():,.2f}", None, "Highest price in this range."),
+                   (f"{rng} low", f"₹{df['Low'].min():,.2f}", None, "Lowest price in this range.")])
+        if moves:
+            st.markdown("**⚡ Biggest moves and what was in the news**")
+            for ts, _, pct in reversed(moves):
+                head = heads.get(ts)
+                label = f"{ts:%d %b %Y} · {'▲' if pct > 0 else '▼'} {pct:+.1f}%"
+                if head:
+                    st.markdown(f"- **{label}**: [{md_safe(head['title'])}]({safe_url(head['link'])})  \n"
+                                f"  <small>{md_safe(head['publisher'])}</small>", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"- **{label}**: no matching headline found")
+            st.caption("Diamonds on the chart mark these days. The headline is the top news result around that date, "
+                       "so it may not be the real cause. Please open the article to check.")
+        elif not intraday:
+            st.caption("No unusually big single moves in this range.")
+
+    with st.spinner("Loading company numbers…"):
+        fund = load_fundamentals(ticker)
+    analysis_card(price, fund)
+
     related = [s for s in stories if pick in s["tags"]][:3]
     st.markdown("**Latest news on this company**" if related else "No recent headlines mention this company.")
     for s in related:
         st.markdown(f"- [{md_safe(s['title'])}]({safe_url(s['link'])})  \n  <small>{md_safe(s['source'])} · {time_ago(s['ts'])}</small>",
                     unsafe_allow_html=True)
+
+
+# ------------------------------------------------ dividends, splits and bonus
+NSE_PAGE = "https://www.nseindia.com/companies-listing/corporate-filings-actions"
+NSE_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+               "Accept": "application/json,text/plain,*/*", "Accept-Language": "en-US,en;q=0.9", "Referer": NSE_PAGE}
+
+
+def _nse_date(text) -> date | None:
+    try:
+        return datetime.strptime(str(text).strip(), "%d-%b-%Y").date()
+    except Exception:
+        return None
+
+
+def _action_kind(subject: str) -> str | None:
+    low = subject.lower()
+    if "bonus" in low:
+        return "Bonus"
+    if "split" in low or "sub-division" in low or "sub division" in low:
+        return "Split"
+    if "dividend" in low:
+        return "Dividend"
+    return None
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_corporate_actions() -> list[dict]:
+    """Upcoming dividends, splits and bonus issues from the NSE (next 45 days)."""
+    today = datetime.now(IST).date()
+    url = ("https://www.nseindia.com/api/corporates-corporateActions?index=equities"
+           f"&from_date={today:%d-%m-%Y}&to_date={today + timedelta(days=45):%d-%m-%Y}")
+    out: list[dict] = []
+    try:
+        session = requests.Session()
+        session.headers.update(NSE_HEADERS)
+        session.get("https://www.nseindia.com", timeout=6)  # NSE needs this first to hand out cookies
+        resp = session.get(url, timeout=10)
+        resp.raise_for_status()
+        for item in resp.json():
+            subject = clean_text(item.get("subject", ""))
+            kind, ex = _action_kind(subject), _nse_date(item.get("exDate"))
+            if kind and ex and ex >= today:
+                out.append({"company": item.get("comp") or item.get("symbol") or "?", "symbol": item.get("symbol", ""),
+                            "kind": kind, "detail": subject, "ex": ex, "record": _nse_date(item.get("recDate"))})
+    except Exception as exc:
+        log.warning("NSE corporate actions failed: %s", exc)
+    return sorted(out, key=lambda a: (a["ex"], a["company"]))
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_dividend_backup() -> list[dict]:
+    """Backup route: next ex-dividend dates of the large companies tracked here (dividends only)."""
+    today = datetime.now(IST).date()
+
+    def one(item):
+        name, (tk, _) = item
+        try:
+            ex = yf.Ticker(tk).calendar.get("Ex-Dividend Date")
+            ex = ex.date() if isinstance(ex, datetime) else ex
+            if isinstance(ex, date) and ex >= today:
+                return {"company": name, "symbol": tk.replace(".NS", ""), "kind": "Dividend",
+                        "detail": "Dividend (check the company's website for the amount)", "ex": ex, "record": None}
+        except Exception:
+            pass
+        return None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        return sorted([r for r in pool.map(one, COMPANIES.items()) if r], key=lambda a: a["ex"])
+
+
+def corporate_tab() -> None:
+    st.subheader("📅 Upcoming dividends, splits and bonus issues")
+    st.caption("Ex-date: you must already own the shares before this date to receive the benefit. "
+               "Always confirm on the official exchange website before acting.")
+    actions, source = load_corporate_actions(), "NSE India"
+    if not actions:
+        st.warning("Couldn't load the NSE list right now. This free source sometimes blocks cloud apps.")
+        a, b = st.columns(2)
+        a.button("🔄 Try again", on_click=load_corporate_actions.clear, key="ca_retry")
+        if b.button("Show dividends from a backup source", key="ca_backup"):
+            st.session_state["ca_use_backup"] = True
+        st.link_button("Open the official NSE page ↗", NSE_PAGE)
+        if st.session_state.get("ca_use_backup"):
+            actions, source = load_dividend_backup(), "Yahoo Finance (dividends of the large companies tracked here)"
+        if not actions:
+            return
+    kind = st.pills("Type", ["All", "Dividend", "Split", "Bonus"], selection_mode="single", default="All", key="ca_kind") or "All"
+    q = st.text_input("Search company", key="ca_q", placeholder="🔎 Search a company or symbol", label_visibility="collapsed").strip().lower()
+    today = datetime.now(IST).date()
+    shown = [a for a in actions if (kind == "All" or a["kind"] == kind) and (not q or q in f"{a['company']} {a['symbol']}".lower())]
+    st.caption(f"{len(shown)} upcoming · source: {source}")
+    badge = {"Dividend": "green", "Split": "orange", "Bonus": "violet"}
+    for i, a in enumerate(shown[:60]):
+        days = (a["ex"] - today).days
+        when = "today" if days == 0 else "tomorrow" if days == 1 else f"in {days} days"
+        with st.container(border=True, key=f"card_ca_{i}"):
+            st.markdown(f"**{md_safe(a['company'])}** :{badge[a['kind']]}-badge[{a['kind']}]")
+            st.markdown(md_safe(a["detail"]))
+            rec = f" · Record date {a['record']:%d %b %Y}" if a["record"] else ""
+            st.caption(f"Ex-date {a['ex']:%d %b %Y} ({when}){rec}")
+    if len(shown) > 60:
+        st.caption("Showing the first 60. Use the search box to narrow it down.")
+
+
+# ------------------------------------------------------------ financial terms
+TERMS_PER_DAY = 10
+
+
+def terms_for(day: date) -> list[dict]:
+    """Today's 10 terms. The list is walked in a fixed order, so nothing repeats until every block has been shown."""
+    days = len(TERMS) // TERMS_PER_DAY
+    if not days:
+        return []
+    start = (day.toordinal() % days) * TERMS_PER_DAY
+    return TERMS[start:start + TERMS_PER_DAY]
+
+
+def term_block(i: int, t: dict) -> None:
+    st.markdown(f"**{i}. {md_safe(t['term'])}** :blue-badge[{md_safe(t['cat'])}]  \n{md_safe(t['meaning'])}  \n"
+                f"*Example: {md_safe(t['example'])}*")
+
+
+def terms_tab(stories: list[dict]) -> None:
+    days = len(TERMS) // TERMS_PER_DAY
+    if not days:
+        st.info("The terms list wasn't found. Upload terms.py next to app.py in your GitHub repo.")
+        return
+    today = datetime.now(IST).date()
+    st.subheader(f"🧠 10 terms of the day · {today:%A, %d %B %Y}")
+    st.caption(f"{len(TERMS)} unique terms, shown in a fixed order, so nothing repeats for {days} days.")
+    for i, t in enumerate(terms_for(today), 1):
+        term_block(i, t)
+
+    counts, meaning = Counter(), {}
+    for s in stories[:100]:
+        for name, m in glossary_hits(f"{s['title']} {s['summary']}"):
+            counts[name] += 1
+            meaning[name] = m
+    if counts:
+        st.subheader("📰 Terms in today's news")
+        for name, n in counts.most_common(6):
+            st.markdown(f"**{md_safe(name)}**: {md_safe(meaning[name])}  \n<small>in {n} stor{'y' if n == 1 else 'ies'}</small>",
+                        unsafe_allow_html=True)
+
+    with st.expander("⏮ Previous days"):
+        back = st.slider("Days back", 1, 7, 1, key="terms_back")
+        day = today - timedelta(days=back)
+        st.markdown(f"**{day:%A, %d %B}**")
+        for i, t in enumerate(terms_for(day), 1):
+            term_block(i, t)
+    with st.expander(f"📖 Browse all {len(TERMS)} terms"):
+        a, b = st.columns([2, 1])
+        q = a.text_input("Search terms", key="terms_q", placeholder="🔎 Search a term").strip().lower()
+        cat = b.selectbox("Topic", ["All"] + sorted({t["cat"] for t in TERMS}), key="terms_cat")
+        hits = [t for t in sorted(TERMS, key=lambda t: t["term"].lower())
+                if (cat == "All" or t["cat"] == cat) and (not q or q in f"{t['term']} {t['meaning']}".lower())]
+        st.caption(f"{len(hits)} matching terms" + (" (showing the first 40)" if len(hits) > 40 else ""))
+        for i, t in enumerate(hits[:40], 1):
+            term_block(i, t)
 
 
 def focus_tab(stories: list[dict], prices: dict) -> None:
@@ -782,11 +959,22 @@ def focus_tab(stories: list[dict], prices: dict) -> None:
                             unsafe_allow_html=True)
 
 
+def stat_grid(items: list[tuple]) -> None:
+    """Responsive tiles: 4 across on a laptop, 2 across on a phone. items = (label, value, pct change or None, tooltip)."""
+    cells = []
+    for label, value, pct, tip in items:
+        delta = ""
+        if pct is not None:
+            delta = f'<div class="d {"up" if pct >= 0 else "dn"}">{"▲" if pct >= 0 else "▼"} {abs(pct):.2f}%</div>'
+        cells.append(f'<div class="stat" title="{html.escape(tip, quote=True)}"><div class="l">{html.escape(label)}</div>'
+                     f'<div class="v">{html.escape(value)}</div>{delta}</div>')
+    st.markdown(f'<div class="stat-grid">{"".join(cells)}</div>', unsafe_allow_html=True)
+
+
 def metrics_row(prices: dict) -> None:
-    for col, (label, tk) in zip(st.columns(len(INDICES)), INDICES.items()):
-        v = prices.get(tk)
-        col.metric(label, f"{v[0]:,.2f}" if v else "—", f"{v[1]:+.2f}%" if v else None,
-                   help="Change vs previous close. Green = up, red = down." if v else "Data unavailable right now.")
+    stat_grid([(label, f"{v[0]:,.2f}" if v else "—", v[1] if v else None,
+                "Change vs previous close. Green = up, red = down." if v else "Data unavailable right now.")
+               for label, tk in INDICES.items() for v in [prices.get(tk)]])
 
 
 def price_status() -> str:
@@ -800,9 +988,9 @@ def price_status() -> str:
 
 @st.fragment(run_every=f"{PRICE_REFRESH}s")
 def price_bar() -> None:
-    prices = get_prices()
+    prices = load_prices(all_tickers())
     metrics_row(prices)
-    st.caption(price_status() + f" · prices update every {PRICE_REFRESH}-{COMPANY_REFRESH} sec")
+    st.caption(price_status() + f" · updates every {PRICE_REFRESH} sec")
     mood_bar(mover_rows(prices))
 
 
@@ -818,58 +1006,15 @@ def news_section() -> None:
     news_tab(apply_filters(stories)[:MAX_STORIES], len(stories))
 
 
-@st.fragment(run_every=f"{MOVERS_REFRESH}s")
+@st.fragment(run_every=f"{PRICE_REFRESH}s")
 def movers_section() -> None:
-    movers_tab(mover_rows(get_prices()), load_news()[0])
+    movers_tab(mover_rows(load_prices(all_tickers())), load_news()[0])
     st.caption(price_status())
 
 
 @st.fragment(run_every="60s")
 def focus_section() -> None:
-    focus_tab(load_news()[0], get_prices())
-
-
-def terms_for(day: date) -> list[tuple]:
-    """The TERMS_PER_DAY terms for a given day, in a fixed order that wraps around only after the whole library is used."""
-    start = (day - START_DATE).days * TERMS_PER_DAY
-    return [TERMS[(start + i) % len(TERMS)] for i in range(TERMS_PER_DAY)]
-
-
-@st.fragment(run_every="30m")  # re-checks the date so the terms change at midnight even on an open page
-def terms_section() -> None:
-    today = datetime.now(IST).date()
-    st.subheader(f"📚 {TERMS_PER_DAY} terms of the day · {today:%A, %d %B %Y}")
-    for n, (term, cat, meaning, example) in enumerate(terms_for(today), 1):
-        with st.container(border=True, key=f"card_term_{n}"):
-            st.markdown(f"**{n}. {md_safe(term)}**  :blue-badge[{cat}]")
-            st.markdown(md_safe(meaning))
-            st.markdown(f"*Example:* {md_safe(example)}")
-    cycle_days = -(-len(TERMS) // TERMS_PER_DAY)
-    st.caption(f"{TERMS_PER_DAY} new terms every day, in a fixed order, so nothing repeats for {cycle_days} days ({len(TERMS)} terms in the library).")
-
-    seen: Counter = Counter()
-    for s in load_news()[0]:
-        for name, mean in glossary_hits(f"{s['title']} {s['summary']}"):
-            seen[(name, mean)] += 1
-    if seen:
-        st.subheader("📰 Terms in today's news")
-        for (name, mean), n in seen.most_common(6):
-            st.markdown(f"**{md_safe(name)}**: {md_safe(mean)} *(in {n} stor{'ies' if n != 1 else 'y'})*")
-
-    past = [d for d in (today - timedelta(days=i) for i in range(1, 8)) if d >= START_DATE]
-    if past:
-        with st.expander("🗓️ Previous days"):
-            for d in past:
-                names = ", ".join(md_safe(t[0]) for t in terms_for(d))
-                st.markdown(f"**{d:%a %d %b}**: {names}")
-
-    with st.expander("🔎 Browse all terms"):
-        pick = st.pills("Category", ["All", "Investing", "Markets", "Economy", "Company"], selection_mode="single",
-                        default="All", key="terms_cat", label_visibility="collapsed")
-        q = st.text_input("Search terms", key="terms_q", placeholder="Search a term or its meaning", label_visibility="collapsed").strip().lower()
-        rows = [{"Term": t, "Category": c, "Meaning": m, "Example": e} for t, c, m, e in TERMS
-                if (pick in (None, "All") or c == pick) and (not q or q in f"{t} {m}".lower())]
-        st.dataframe(pd.DataFrame(rows), hide_index=True, **PLOT_KW)
+    focus_tab(load_news()[0], load_prices(all_tickers()))
 
 
 DISCLAIMER = """**Disclaimer**
@@ -889,15 +1034,18 @@ def main() -> None:
     header()
     filter_bar()
     price_bar()
-    t_news, t_movers, t_focus, t_terms = st.tabs(["📰 News", "📈 Gainers & losers", "🔥 Stocks in focus", "📚 Financial terms"])
+    t_news, t_movers, t_focus, t_actions, t_terms = st.tabs(
+        ["📰 News", "📈 Gainers & losers", "🔥 Stocks in focus", "📅 Dividends & splits", "📚 Financial terms"])
     with t_news:
         news_section()
     with t_movers:
         movers_section()
     with t_focus:
         focus_section()
+    with t_actions:
+        corporate_tab()
     with t_terms:
-        terms_section()
+        terms_tab(load_news()[0])
     st.divider()
     st.caption(DISCLAIMER)
     st.caption(f"{ORG_NAME} {VERSION}")
