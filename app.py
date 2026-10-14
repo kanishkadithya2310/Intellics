@@ -23,6 +23,12 @@ v1.4 (polish and reliability, no new features):
 - Market status notices a trading holiday instead of saying "open"
 - Every article shows its publication time with the IST label, or says it is unavailable
 - Darker video overlay for readable text; video hidden for people who prefer reduced motion
+
+v1.5 (free "premium" touches):
+- Sector heatmap on the Gainers & losers page (colour = today's move, grouped by sector)
+- Terms quiz: 5 questions from the 600-term list, with score and streak
+- About page: sources, update times, how summaries work and known limits
+- Feedback button (set FEEDBACK_URL to your Google Form link) on the About page and in the footer
 """
 from __future__ import annotations
 
@@ -31,6 +37,7 @@ import hashlib
 import html
 import json
 import logging
+import random
 import re
 import textwrap
 import threading
@@ -59,7 +66,7 @@ except Exception:  # keep the app alive even if the file is missing
     TERMS = []
 
 # ----------------------------------------------------------------- settings
-VERSION = "1.4 beta"
+VERSION = "1.5 beta"
 NEWS_REFRESH = 120   # seconds between news refreshes
 PRICE_REFRESH = 30   # seconds between price refreshes (as fast as the free source allows)
 MAX_STORIES = 40
@@ -141,6 +148,18 @@ COMPANIES = {  # name -> (Yahoo ticker, alias regexes; short ALL-CAPS aliases ma
     "NTPC": ("NTPC.NS", ["NTPC"]), "Power Grid": ("POWERGRID.NS", ["Power Grid"]),
     "Coal India": ("COALINDIA.NS", ["Coal India"]), "BEL": ("BEL.NS", ["BEL", "Bharat Electronics"]),
     "Polycab": ("POLYCAB.NS", ["Polycab"]),
+}
+SECTORS = {  # our own simple grouping, used only for the heatmap
+    "TCS": "IT", "Infosys": "IT", "HCL Tech": "IT", "Wipro": "IT", "Tech Mahindra": "IT",
+    "HDFC Bank": "Banks", "ICICI Bank": "Banks", "SBI": "Banks", "Kotak Bank": "Banks", "Axis Bank": "Banks",
+    "SBI Life": "Finance", "Bajaj Finance": "Finance",
+    "Reliance": "Oil & gas", "ONGC": "Oil & gas",
+    "ITC": "FMCG", "HUL": "FMCG", "Asian Paints": "Consumer", "Titan": "Consumer",
+    "Tata Motors": "Auto", "Maruti": "Auto", "M&M": "Auto",
+    "Tata Steel": "Metals & mining", "JSW Steel": "Metals & mining", "Coal India": "Metals & mining",
+    "Tata Power": "Power", "NTPC": "Power", "Power Grid": "Power",
+    "L&T": "Infrastructure", "Adani Ports": "Infrastructure", "Adani Enterprises": "Infrastructure",
+    "Airtel": "Telecom", "Sun Pharma": "Pharma", "BEL": "Defence", "Polycab": "Industrials",
 }
 TOPICS = {
     "Markets": ["sensex", "nifty", "stock market", "shares", "stocks", "bse", "nse", "ipo", "sebi", "fii", "fpi"],
@@ -706,6 +725,32 @@ def news_tab(items: list[dict], total: int) -> None:
         render_story(s, summaries[s["id"]])
 
 
+def sector_heatmap(rows: list) -> None:
+    """Treemap of the tracked companies grouped by sector. Colour = today's % move (green up, red down)."""
+    groups: dict[str, list[tuple[str, float]]] = {}
+    for name, _, _, pct in rows:
+        groups.setdefault(SECTORS.get(name, "Others"), []).append((name, pct))
+    labels, parents, values, colors, texts = [], [], [], [], []
+    for sector, items in groups.items():
+        avg = sum(p for _, p in items) / len(items)
+        labels.append(sector), parents.append(""), values.append(0), colors.append(avg), texts.append(f"{avg:+.2f}% avg")
+        for name, pct in items:
+            labels.append(name), parents.append(sector), values.append(1), colors.append(pct), texts.append(f"{pct:+.2f}%")
+    limit = max(2.0, max(abs(c) for c in colors))
+    fig = go.Figure(go.Treemap(
+        labels=labels, parents=parents, values=values, branchvalues="remainder", text=texts,
+        texttemplate="%{label}<br>%{text}", hovertemplate="%{label}: %{text}<extra></extra>",
+        marker=dict(colors=colors, cmin=-limit, cmax=limit, cmid=0, line=dict(width=1, color="#0a0f1f"),
+                    colorscale=[[0, "#ef4444"], [0.5, "#334155"], [1, "#22c55e"]]),
+        pathbar=dict(visible=False)))
+    fig.update_layout(height=380, margin=dict(l=0, r=0, t=0, b=0), paper_bgcolor="rgba(0,0,0,0)",
+                      font_color="#f8fafc", dragmode=False)
+    st.subheader("🗺️ Sector heatmap")
+    st.plotly_chart(fig, **PLOT_KW, config={"displayModeBar": False})
+    st.caption("Each box is one company, grouped by sector (our own simple grouping). Same size for every company; "
+               "colour shows today's move vs previous close.")
+
+
 def movers_tab(rows: list, stories: list[dict]) -> None:
     if not rows:
         st.info("Price data didn't load this time. Tap the button to try again.")
@@ -733,6 +778,7 @@ def movers_tab(rows: list, stories: list[dict]) -> None:
             col.metric(name, f"₹{price:,.2f}", f"{pct:+.2f}%")
     st.caption("Change vs previous close, among large NSE companies tracked here. Outside market hours this shows the last session.")
 
+    sector_heatmap(rows)
     company_explorer(rows, stories)
 
 
@@ -1349,6 +1395,110 @@ def terms_tab(stories: list[dict]) -> None:
             term_block(i, t)
 
 
+QUIZ_LEN = 5
+
+
+def quiz_pool() -> list[dict]:
+    return [t for t in TERMS if t.get("term") and t.get("meaning")]
+
+
+def new_quiz() -> None:
+    """Pick 5 random terms. Wrong answers come from the same topic where possible, so they look believable."""
+    rng, pool, qs = random.Random(), quiz_pool(), []
+    for t in rng.sample(pool, min(QUIZ_LEN, len(pool))):
+        same = [x for x in pool if x["term"] != t["term"] and x.get("cat") == t.get("cat")]
+        other = [x for x in pool if x["term"] != t["term"] and x.get("cat") != t.get("cat")]
+        wrong = rng.sample(same, min(3, len(same)))
+        wrong += rng.sample(other, min(3 - len(wrong), len(other)))
+        opts = [t["term"]] + [w["term"] for w in wrong]
+        rng.shuffle(opts)
+        qs.append({"term": t["term"], "meaning": t["meaning"], "example": t.get("example", ""), "opts": opts})
+    st.session_state["quiz"] = {"qs": qs, "i": 0, "score": 0, "checked": False, "pick": None, "id": rng.randrange(10**9)}
+
+
+def quiz_check() -> None:
+    ss = st.session_state
+    quiz = ss["quiz"]
+    pick = ss.get(f"qpick_{quiz['id']}_{quiz['i']}")
+    if pick is None:  # nothing chosen yet
+        return
+    quiz["checked"], quiz["pick"] = True, pick
+    if pick == quiz["qs"][quiz["i"]]["term"]:
+        quiz["score"] += 1
+        ss["quiz_streak"] = ss.get("quiz_streak", 0) + 1
+        ss["quiz_best"] = max(ss.get("quiz_best", 0), ss["quiz_streak"])
+    else:
+        ss["quiz_streak"] = 0
+
+
+def quiz_next() -> None:
+    quiz = st.session_state["quiz"]
+    quiz["i"] += 1
+    quiz["checked"], quiz["pick"] = False, None
+
+
+def quiz_tab() -> None:
+    st.subheader("🎯 Terms quiz")
+    if len(quiz_pool()) < 10:
+        st.info("The terms list wasn't found. Upload terms.py next to app.py in your GitHub repo.")
+        return
+    ss = st.session_state
+    quiz = ss.get("quiz")
+    if not quiz:
+        st.write(f"{QUIZ_LEN} quick questions from our {len(TERMS)} finance terms. Read the meaning, pick the right term.")
+        st.button("Start quiz", on_click=new_quiz, key="quiz_start")
+        return
+    n = len(quiz["qs"])
+    if quiz["i"] >= n:
+        st.success(f"You scored {quiz['score']} out of {n}.")
+        st.caption(f"Best streak this visit: {ss.get('quiz_best', 0)} correct in a row")
+        st.button("Play again", on_click=new_quiz, key="quiz_again")
+        return
+    q = quiz["qs"][quiz["i"]]
+    st.progress(quiz["i"] / n, text=f"Question {quiz['i'] + 1} of {n} · score {quiz['score']} · streak {ss.get('quiz_streak', 0)}")
+    st.markdown(f"**Which term means:** {md_safe(q['meaning'])}")
+    st.radio("Choose one", q["opts"], index=None, key=f"qpick_{quiz['id']}_{quiz['i']}",
+             disabled=quiz["checked"], label_visibility="collapsed")
+    if not quiz["checked"]:
+        st.button("Check answer", on_click=quiz_check, key="quiz_check")
+        return
+    if quiz["pick"] == q["term"]:
+        st.success(f"Correct! It's {q['term']}.")
+    else:
+        st.error(f"Not quite. The answer is {q['term']}.")
+    if q["example"]:
+        st.caption(f"Example: {q['example']}")
+    st.button("Next question" if quiz["i"] < n - 1 else "See my score", on_click=quiz_next, key="quiz_next")
+
+
+def about_tab() -> None:
+    st.subheader("ℹ️ About Intellics")
+    st.markdown("Intellics is a student project that explains Indian market news and prices in plain English. "
+                "It is free to use and built only with free tools.")
+    st.markdown("**Where the data comes from**")
+    st.markdown("- **News:** " + ", ".join(SOURCES) + ". Google News results are kept only if the publisher is on our trusted list. "
+                "We link to the original article and never copy it.\n"
+                "- **Prices and company numbers:** Yahoo Finance (free, unofficial).\n"
+                "- **Dividends, splits and bonus issues:** NSE India, with a Yahoo backup.")
+    st.markdown("**How often it updates**")
+    st.markdown(f"- News: about every {NEWS_REFRESH // 60} minutes.\n- Prices: about every {PRICE_REFRESH} seconds. "
+                "The page always shows the time of the latest data point, so you can see how fresh it is.")
+    st.markdown("**How the summaries work**")
+    st.markdown("Each summary is written automatically from the headline and the short preview, not the full article. "
+                "When a free AI service is available it writes the summary; otherwise a simple rule-based version is used. "
+                "Either way it can miss details, so please open the original article.")
+    st.markdown("**Known limits**")
+    st.markdown("- Free data can be delayed, incomplete or briefly unavailable. A dash (—) means *not available*, not zero.\n"
+                "- Only about 33 large companies are tracked, not the whole market.\n"
+                "- Nothing here is investment advice. See the disclaimer below.")
+    st.markdown(f"**What's new in {VERSION}:** sector heatmap, terms quiz, this About page. "
+                "Earlier: faster page loads, clearer data times, holiday-aware market status.")
+    if FEEDBACK_URL:
+        st.link_button("Found a problem or have an idea? Tell us", FEEDBACK_URL)
+    else:
+        st.caption("Feedback form coming soon.")
+
+
 def focus_tab(stories: list[dict], prices: dict) -> None:
     by_stock: dict[str, list[dict]] = {}
     for s in stories:
@@ -1436,7 +1586,7 @@ Intellics is a student learning project made for educational purposes only. Noth
 
 # ------------------------------------------------------------- navigation
 PAGES = {"news": "📰 News", "movers": "📈 Gainers & losers", "focus": "🔥 Stocks in focus",
-         "actions": "📅 Dividends & splits", "terms": "📚 Financial terms"}
+         "actions": "📅 Dividends & splits", "terms": "📚 Financial terms", "quiz": "🎯 Quiz", "about": "ℹ️ About"}
 
 
 def navigation() -> str:
@@ -1468,8 +1618,12 @@ def main() -> None:
         focus_section()
     elif page == "actions":
         corporate_tab()
-    else:
+    elif page == "terms":
         terms_tab(load_news()[0])
+    elif page == "quiz":
+        quiz_tab()
+    else:
+        about_tab()
     st.divider()
     st.caption(DISCLAIMER)
     st.caption(f"{ORG_NAME} {VERSION}")
