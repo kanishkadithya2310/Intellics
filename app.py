@@ -1,4 +1,4 @@
-"""Intellics v1.3 beta: Indian markets news, explained simply.
+"""Intellics v1.4 beta: Indian markets news, explained simply.
 
 - Animated background video (the whole picture shows on phones too)
 - Easy navigation: tappable buttons for every section (no side-swiping on a phone)
@@ -14,6 +14,15 @@
   on big days and a fundamentals table (P/B, EPS, debt to equity, ROE...)
 - Upcoming dividends, splits and bonus issues
 - 10 financial terms a day (600 unique terms in terms.py, no repeats for 60 days)
+
+v1.4 (polish and reliability, no new features):
+- Pages no longer wait ~25 s for AI summaries (basic summaries show at once, AI ones fill in later)
+- A single slow news feed can no longer hold up the whole page (overall time limit)
+- Failed lookups (fundamentals, NSE list) are no longer remembered for an hour
+- The company header shows the time of the last real data point, not the current clock time
+- Market status notices a trading holiday instead of saying "open"
+- Every article shows its publication time with the IST label, or says it is unavailable
+- Darker video overlay for readable text; video hidden for people who prefer reduced motion
 """
 from __future__ import annotations
 
@@ -50,10 +59,13 @@ except Exception:  # keep the app alive even if the file is missing
     TERMS = []
 
 # ----------------------------------------------------------------- settings
-VERSION = "1.3 beta"
+VERSION = "1.4 beta"
 NEWS_REFRESH = 120   # seconds between news refreshes
 PRICE_REFRESH = 30   # seconds between price refreshes (as fast as the free source allows)
 MAX_STORIES = 40
+FEED_DEADLINE = 14   # seconds: stop waiting for slow news feeds after this long
+SUMMARY_WAIT = 6     # seconds to wait for AI summaries before showing the basic ones
+FAIL_PAUSE = 120     # seconds to leave a failing free source alone before trying it again
 ORG_NAME = "Intellics Committee"
 ORG_SUBTITLE = "The AI and Data Analytics Committee"
 TAGLINE = "Think | Analyze | Evolve"
@@ -220,6 +232,11 @@ def md_safe(text: str) -> str:
     return re.sub(r"([\\`*_\[\]$~#<>|])", r"\\\1", text)
 
 
+def small(text: str) -> str:
+    """Small grey text for use inside markdown. HTML-escaped first, so a publisher name can never inject markup."""
+    return f"<small>{md_safe(html.escape(text, quote=False))}</small>"
+
+
 def safe_url(url: str) -> str:
     return url.replace(" ", "%20").replace(")", "%29").replace("(", "%28")
 
@@ -234,6 +251,11 @@ def time_ago(ts: datetime | None) -> str:
     secs = max(0, int((datetime.now(UTC) - ts).total_seconds()))
     return ("just now" if secs < 60 else f"{secs // 60} min ago" if secs < 3600
             else f"{secs // 3600} h ago" if secs < 86400 else f"{secs // 86400} d ago")
+
+
+def _stamp(now: datetime) -> str:
+    """e.g. '14 Oct, 3:29 pm IST'. Expects a datetime already in IST."""
+    return f"{now.day} {now:%b}, {now.hour % 12 or 12}:{now:%M} {'am' if now.hour < 12 else 'pm'} IST"
 
 
 def glossary_hits(blob: str) -> list[tuple[str, str]]:
@@ -268,15 +290,31 @@ def build_story(entry, source: str) -> dict | None:
             "ts": datetime(*parsed[:6], tzinfo=UTC) if parsed else None}
 
 
+def http_get(url: str, headers: dict | None = None, timeout: int = 6) -> requests.Response:
+    """GET with a timeout and ONE retry (after a short pause) for timeouts, connection errors, 429 and 5xx.
+    Other errors (404, 403...) fail straight away, because retrying would not help."""
+    for attempt in (0, 1):
+        try:
+            resp = requests.get(url, headers=headers or HEADERS, timeout=timeout)
+            if (resp.status_code == 429 or resp.status_code >= 500) and attempt == 0:
+                time.sleep(0.8)
+                continue
+            resp.raise_for_status()
+            return resp
+        except (requests.Timeout, requests.ConnectionError):
+            if attempt == 1:
+                raise
+            time.sleep(0.8)
+    raise RuntimeError("request failed")
+
+
 def fetch_feed(item):
     """item = (source name, list of feed URLs). Tries each URL in order until one gives stories."""
     name, urls = item
     err = "no stories found"
     for url in urls:
         try:
-            resp = requests.get(url, headers=HEADERS, timeout=8)
-            resp.raise_for_status()
-            entries = feedparser.parse(resp.content).entries
+            entries = feedparser.parse(http_get(url).content).entries
             if entries:
                 return name, entries, None
         except Exception as exc:
@@ -286,25 +324,45 @@ def fetch_feed(item):
 
 
 def dedupe(stories: list[dict]) -> list[dict]:
+    """Drop repeats: same link, same normalised headline, or a headline sharing 75%+ of its words with one already kept."""
     norm = lambda t: re.sub(r"[^a-z0-9 ]", "", t.lower())
-    kept, seen = [], set()
+    kept, links, keys, word_sets = [], set(), set(), []
     for s in stories:
         key = norm(s["title"])
-        if s["link"] in seen or key in seen or any(SequenceMatcher(None, key, k["_key"]).ratio() > 0.88 for k in kept):
+        words = frozenset(key.split())
+        if s["link"] in links or key in keys:
             continue
-        s["_key"] = key
-        seen.update((s["link"], key))
+        if words and any(len(words & w) / len(words | w) >= 0.75 for w in word_sets):
+            continue
+        links.add(s["link"])
+        keys.add(key)
+        word_sets.append(words)
         kept.append(s)
     return kept
 
 
 @st.cache_data(ttl=NEWS_REFRESH, show_spinner=False)
 def load_news():
+    """All feeds are read in parallel. Feeds that are still silent after FEED_DEADLINE seconds are skipped
+    (and reported as 'did not respond'), so one slow website cannot freeze the whole page."""
     stories, failed = [], []
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        for name, entries, err in pool.map(fetch_feed, SOURCES.items()):
-            failed += [name] if err else []
-            stories += [s for s in (build_story(e, name) for e in entries) if s]
+    pool = ThreadPoolExecutor(max_workers=8)
+    futures = {name: pool.submit(fetch_feed, (name, urls)) for name, urls in SOURCES.items()}
+    wait(list(futures.values()), timeout=FEED_DEADLINE)
+    pool.shutdown(wait=False, cancel_futures=True)
+    for name, fut in futures.items():
+        if not fut.done():
+            failed.append(name)
+            continue
+        try:
+            _, entries, err = fut.result()
+        except Exception as exc:
+            log.warning("Feed crashed: %s (%s)", name, exc)
+            failed.append(name)
+            continue
+        if err:
+            failed.append(name)
+        stories += [s for s in (build_story(e, name) for e in entries) if s]
     stories.sort(key=lambda s: s["ts"] or datetime.min.replace(tzinfo=UTC), reverse=True)
     return dedupe(stories)[:200], failed, datetime.now(IST)
 
@@ -312,7 +370,8 @@ def load_news():
 # --------------------------------------------------- simple-language summaries
 @st.cache_resource
 def _store():
-    return {"data": {}, "pending": set(), "lock": threading.Lock(), "pool": ThreadPoolExecutor(max_workers=2)}
+    return {"data": {}, "pending": set(), "lock": threading.Lock(), "pool": ThreadPoolExecutor(max_workers=2),
+            "info_fail": {}, "nse_fail": {}}
 
 
 def groq_key() -> str:
@@ -349,18 +408,20 @@ def _run_batch(batch: list[dict], api_key: str) -> None:
             result = json.loads(r.json()["choices"][0]["message"]["content"])
             break
         except Exception as exc:
-            log.warning("AI summary batch failed: %s", exc)
+            log.warning("AI summary batch failed: %s", exc)  # never log the key or the request headers
             break
     store = _store()
     with store["lock"]:
         for i, s in enumerate(batch, 1):
             text = str(result.get(str(i), "")).strip()
-            if len(text) >= 100:
+            if 100 <= len(text) <= 900:  # too short or rambling answers are ignored; the basic summary stays
                 store["data"][s["id"]] = {"t": text, "m": "ai", "at": time.time()}
             store["pending"].discard(s["id"])
 
 
 def get_summaries(stories: list[dict]) -> dict[str, dict]:
+    """Returns a summary for every story straight away (basic ones where AI is not ready yet).
+    AI batches keep running in the background; whatever finishes shows up on the next refresh."""
     store, api_key, now, todo = _store(), groq_key(), time.time(), []
     with store["lock"]:
         if len(store["data"]) > 1500:
@@ -377,8 +438,9 @@ def get_summaries(stories: list[dict]) -> dict[str, dict]:
                 entry["at"] = now
     futures = [store["pool"].submit(_run_batch, todo[i:i + 5], api_key) for i in range(0, len(todo), 5)]
     if futures:
-        wait(futures, timeout=25)  # slow batches keep running and show up on the next refresh
-    return {s["id"]: store["data"][s["id"]] for s in stories}
+        wait(futures, timeout=SUMMARY_WAIT)  # slow batches keep running and show up on the next refresh
+    with store["lock"]:
+        return {s["id"]: dict(store["data"][s["id"]]) for s in stories}
 
 
 # -------------------------------------------------------------- price data
@@ -442,10 +504,22 @@ def mover_rows(prices: dict) -> list[tuple[str, str, float, float]]:
     return sorted(rows, key=lambda r: r[3], reverse=True)
 
 
-def market_status() -> str:
+def market_label(ts: datetime | None) -> str:
+    """Plain-words market status. Uses the time of the newest data point too, so a trading holiday
+    (a weekday with no trading) is not wrongly described as 'open'."""
     now = datetime.now(IST)
-    open_ = now.weekday() < 5 and (9, 15) <= (now.hour, now.minute) <= (15, 30)
-    return "Market open (prices may be delayed)" if open_ else "Market closed: showing the last session"
+    hm = (now.hour, now.minute)
+    in_hours = now.weekday() < 5 and (9, 15) <= hm <= (15, 30)
+    if not in_hours:
+        return "Market closed: showing the last session"
+    if ts is None:
+        return "Market hours: freshness of the data could not be checked"
+    if ts.astimezone(IST).date() == now.date():
+        lag = (now - ts).total_seconds() / 60
+        return "Market open" + (f" · data is about {lag:.0f} min behind" if lag > 2 else " (prices may be delayed)")
+    if hm < (9, 45):
+        return "Market just opened: waiting for today's first prices"
+    return "No trading data for today (holiday?): showing the last session"
 
 
 # ------------------------------------------------------------ look and feel
@@ -464,7 +538,7 @@ div[class*="st-key-card_"]{{background:rgba(255,255,255,.05);backdrop-filter:blu
 div[class*="st-key-card_"]:hover{{transform:translateY(-3px);border-color:rgba(120,160,255,.6)}}
 .hero-title{{font-size:2rem;font-weight:800;letter-spacing:.12em;line-height:1.15;margin:0}}
 .brand{{display:flex;align-items:center;gap:16px;margin-bottom:.3rem}}
-.hero-sub{{opacity:.8;margin-bottom:.6rem}}
+.hero-sub{{opacity:.85;margin-bottom:.6rem}}
 .mood{{height:12px;border-radius:99px;overflow:hidden;background:#ef4444;margin:.3rem 0 .2rem}}
 .mood>div{{height:100%;background:#22c55e;transition:width .6s}}
 button{{min-height:44px;border-radius:12px!important}}
@@ -472,28 +546,28 @@ button{{min-height:44px;border-radius:12px!important}}
 .st-key-nav button{{min-height:46px;font-weight:600;padding:0 16px}}
 .stat-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:.4rem 0 .6rem}}
 .stat{{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:14px;padding:10px 12px;backdrop-filter:blur(8px)}}
-.stat .l{{font-size:.74rem;opacity:.72;letter-spacing:.02em}}
+.stat .l{{font-size:.74rem;opacity:.78;letter-spacing:.02em}}
 .stat .v{{font-size:1.3rem;font-weight:700;line-height:1.3}}
 .stat .d{{font-size:.8rem;font-weight:600}}
 .stat .d.up{{color:#4ade80}}.stat .d.dn{{color:#f87171}}
 .gf-head{{margin:.2rem 0 .4rem}}
 .gf-title{{font-size:1.7rem;font-weight:500;line-height:1.25}}
-.gf-sub{{font-size:.85rem;opacity:.7;margin-bottom:.5rem}}
+.gf-sub{{font-size:.85rem;opacity:.75;margin-bottom:.5rem}}
 .gf-row{{display:flex;align-items:center;flex-wrap:wrap;gap:6px 14px}}
 .gf-price{{font-size:2.6rem;font-weight:400;line-height:1.1}}
-.gf-cur{{font-size:1rem;opacity:.65;margin-left:6px}}
+.gf-cur{{font-size:1rem;opacity:.7;margin-left:6px}}
 .gf-badge{{padding:4px 10px;border-radius:8px;font-weight:600;font-size:1rem}}
 .gf-badge.up{{background:#81c995;color:#0b2e17}}.gf-badge.dn{{background:#f28b82;color:#3b0a08}}
 .gf-today{{font-size:1rem;font-weight:500}}.gf-today.up{{color:#81c995}}.gf-today.dn{{color:#f28b82}}
-.gf-time{{font-size:.78rem;opacity:.6;margin-top:4px}}
+.gf-time{{font-size:.78rem;opacity:.72;margin-top:4px}}
 .gf-note{{font-size:.9rem;margin:.3rem 0 .2rem}}
 .gf-note .up{{color:#81c995}}.gf-note .dn{{color:#f28b82}}
 .gf{{display:grid;grid-template-rows:repeat(3,auto);grid-auto-flow:column;column-gap:40px;margin:.6rem 0 1rem}}
 .gfr{{display:flex;justify-content:space-between;gap:14px;padding:7px 0;font-size:.95rem}}
-.gfr .k{{opacity:.75}}.gfr .v{{font-weight:500}}
+.gfr .k{{opacity:.78}}.gfr .v{{font-weight:500}}
 .ftab{{display:grid;grid-template-columns:1fr 1fr;column-gap:32px;margin:.2rem 0 .8rem}}
 .fr{{display:flex;justify-content:space-between;gap:12px;padding:10px 2px;border-bottom:1px solid rgba(255,255,255,.09);font-size:.92rem}}
-.fr .k{{opacity:.72}}.fr .v{{font-weight:600;text-align:right}}
+.fr .k{{opacity:.78}}.fr .v{{font-weight:600;text-align:right}}
 .rb{{margin:.4rem 0 1rem}}
 .rb .ends{{display:flex;justify-content:space-between;font-size:.8rem;opacity:.9;line-height:1.35}}
 .rb .track{{position:relative;height:6px;border-radius:99px;background:linear-gradient(90deg,#ef4444,#f59e0b,#22c55e);margin:8px 0 2px}}
@@ -508,8 +582,9 @@ button{{min-height:44px;border-radius:12px!important}}
 
 def video_background() -> None:
     """Full-screen looping hero video. Set VIDEO_URL = "" to switch it off.
-    Laptop (wide screen): the video fills the screen.
-    Phone (tall screen): the whole video is shown at the top, so the bull and bear are never cropped."""
+    Laptop (wide screen): the video fills the screen under a dark overlay so the text stays readable.
+    Phone (tall screen): the whole video is shown at the top, so the bull and bear are never cropped.
+    People who ask their device for reduced motion get a plain dark background instead of the video."""
     if not VIDEO_URL:
         return
     st.markdown(f"""<style>
@@ -517,16 +592,17 @@ html,body{{background:#0a0f1f}}
 .stApp,[data-testid="stAppViewContainer"],[data-testid="stHeader"]{{background:transparent!important}}
 .stApp::before{{display:none}}
 .hero-video{{position:fixed;top:0;left:0;width:100vw;height:100vh;object-fit:cover;z-index:-1;background:#0a0f1f}}
-.hero-overlay{{position:fixed;inset:0;background:rgba(10,15,31,.55);z-index:-1}}
+.hero-overlay{{position:fixed;inset:0;background:rgba(10,15,31,.72);z-index:-1}}
 @media (max-aspect-ratio:1/1){{
 .hero-video{{object-fit:contain;object-position:center top}}
 .hero-overlay{{background:rgba(10,15,31,.2)}}
 .block-container{{padding-top:calc(56.25vw + 1rem)!important}}
 }}
+@media (prefers-reduced-motion:reduce){{.hero-video{{display:none}}.hero-overlay{{background:#0a0f1f}}}}
 </style>
-<video class="hero-video" autoplay loop muted playsinline>
+<video class="hero-video" autoplay loop muted playsinline preload="metadata" aria-hidden="true">
 <source src="{VIDEO_URL}" type="video/mp4"></video>
-<div class="hero-overlay"></div>""", unsafe_allow_html=True)
+<div class="hero-overlay" aria-hidden="true"></div>""", unsafe_allow_html=True)
 
 
 @lru_cache(maxsize=1)
@@ -595,10 +671,17 @@ def apply_filters(stories: list[dict]) -> list[dict]:
 
 
 # --------------------------------------------------------------------- tabs
+def story_time(ts: datetime | None) -> str:
+    """'24 min ago · 14 Oct, 3:20 pm IST', or an honest 'not provided' when the feed gave no time."""
+    if not ts:
+        return "publication time not provided by the source"
+    return f"{time_ago(ts)} · {_stamp(ts.astimezone(IST))}"
+
+
 def render_story(s: dict, summ: dict) -> None:
     with st.container(border=True, key=f"card_{s['id']}"):
         st.markdown(f"**[{md_safe(s['title'])}]({safe_url(s['link'])})**")
-        st.markdown(" ".join(f":blue-badge[{t}]" for t in s["topics"][:2]) + f"  \n<small>{md_safe(s['source'])} · {time_ago(s['ts'])}</small>",
+        st.markdown(" ".join(f":blue-badge[{t}]" for t in s["topics"][:2]) + "  \n" + small(f"{s['source']} · {story_time(s['ts'])}"),
                     unsafe_allow_html=True)
         st.markdown(md_safe(summ["t"]))
         if s["tags"]:
@@ -659,16 +742,43 @@ RANGES = {"1D": ("1d", "5m"), "5D": ("5d", "15m"), "1M": ("1mo", "1d"), "6M": ("
           "YTD": ("ytd", "1d"), "1Y": ("1y", "1d"), "5Y": ("5y", "1wk"), "Max": ("max", "1mo")}
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+def _history(ticker: str, period: str, interval: str):
+    df = yf.Ticker(ticker).history(period=period, interval=interval)[["Open", "High", "Low", "Close", "Volume"]]
+    df = df.dropna(subset=["Open", "High", "Low", "Close"])
+    df["Volume"] = df["Volume"].fillna(0)
+    if len(df) < 2:
+        raise ValueError("no price history")  # raising (instead of returning None) stops the failure being cached
+    return df
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _ohlc_intraday(ticker: str, period: str, interval: str):
+    return _history(ticker, period, interval)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _ohlc_daily(ticker: str, period: str, interval: str):
+    return _history(ticker, period, interval)
+
+
 def load_ohlc(ticker: str, period: str, interval: str):
+    """Intraday charts refresh every minute, daily/weekly/monthly ones every 15 minutes. Failures are never cached."""
+    fn = _ohlc_daily if interval in ("1d", "1wk", "1mo") else _ohlc_intraday
     try:
-        df = yf.Ticker(ticker).history(period=period, interval=interval)[["Open", "High", "Low", "Close", "Volume"]]
-        df = df.dropna(subset=["Open", "High", "Low", "Close"])
-        df["Volume"] = df["Volume"].fillna(0)
-        return df if len(df) > 1 else None
+        return fn(ticker, period, interval)
     except Exception as exc:
         log.warning("History failed for %s: %s", ticker, exc)
         return None
+
+
+def last_point_time(ticker: str) -> datetime | None:
+    """Time of the newest real price point for this company (IST), or None if it cannot be found."""
+    df = load_ohlc(ticker, "1d", "5m")
+    if df is None:
+        return None
+    ts = df.index[-1]
+    ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts
+    return ts.tz_convert(IST).to_pydatetime()
 
 
 def big_moves(df, weekly: bool) -> list[tuple]:
@@ -690,8 +800,7 @@ def move_headline(name: str, day: str):
     url = "https://news.google.com/rss/search?" + urllib.parse.urlencode(
         {"q": query, "hl": "en-IN", "gl": "IN", "ceid": "IN:en"})
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=8)
-        resp.raise_for_status()
+        resp = http_get(url, timeout=8)
         for entry in feedparser.parse(resp.content).entries[:12]:
             title, publisher = clean_text(entry.get("title", "")), ""
             link = (entry.get("link") or "").strip()
@@ -704,25 +813,66 @@ def move_headline(name: str, day: str):
     return None
 
 
+FUND_KEYS = ("trailingPE", "forwardPE", "priceToBook", "debtToEquity", "returnOnEquity", "profitMargins", "marketCap",
+             "fiftyTwoWeekHigh", "fiftyTwoWeekLow", "dividendRate", "trailingEps", "bookValue", "sector", "industry",
+             "longName")
+RATIO_KEYS = ("priceToBook", "trailingEps", "returnOnEquity", "profitMargins", "debtToEquity", "bookValue")
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
-def load_fundamentals(ticker: str) -> dict:
-    keys = ("trailingPE", "forwardPE", "priceToBook", "debtToEquity", "returnOnEquity", "profitMargins", "marketCap",
-            "fiftyTwoWeekHigh", "fiftyTwoWeekLow", "dividendRate", "trailingEps", "bookValue", "sector", "industry",
-            "longName")
+def _load_info(ticker: str) -> dict:
+    """Full company info from Yahoo (two attempts). Raises when Yahoo gives too little, so a failure is NOT cached for an hour."""
+    last_exc: Exception = RuntimeError("no data")
+    for attempt in (0, 1):
+        try:
+            info = yf.Ticker(ticker).get_info() or {}
+            out = {k: info[k] for k in FUND_KEYS if info.get(k) is not None}
+            if len(out) >= 3:
+                return out
+            last_exc = RuntimeError("Yahoo returned too little data")
+        except Exception as exc:
+            last_exc = exc
+        if attempt == 0:
+            time.sleep(0.6)
+    raise last_exc
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _load_fast_fund(ticker: str) -> dict:
+    """Lighter backup numbers (market cap, 52-week range) that Yahoo rarely blocks."""
     out: dict = {}
     try:
-        tk = yf.Ticker(ticker)
-        info = tk.info or {}
-        out = {k: info[k] for k in keys if info.get(k) is not None}
-        for key, fast_key in (("marketCap", "market_cap"), ("fiftyTwoWeekHigh", "year_high"), ("fiftyTwoWeekLow", "year_low")):
-            if key not in out:  # backup route if the full info call is missing a number
-                try:
-                    out[key] = float(tk.fast_info[fast_key])
-                except Exception:
-                    pass
-    except Exception as exc:
-        log.warning("Fundamentals failed for %s: %s", ticker, exc)
+        fi = yf.Ticker(ticker).fast_info
+    except Exception:
+        return out
+    for key, fast_key in (("marketCap", "market_cap"), ("fiftyTwoWeekHigh", "year_high"), ("fiftyTwoWeekLow", "year_low")):
+        try:
+            v = float(fi[fast_key])
+            if v == v:
+                out[key] = v
+        except Exception:
+            pass
     return out
+
+
+def load_fundamentals(ticker: str) -> dict:
+    out: dict = {}
+    fails = _store()["info_fail"]
+    if time.time() - fails.get(ticker, 0) > FAIL_PAUSE:  # after a failure, leave Yahoo alone for a couple of minutes
+        try:
+            out = dict(_load_info(ticker))
+        except Exception as exc:
+            fails[ticker] = time.time()
+            log.warning("Fundamentals failed for %s: %s", ticker, exc)
+    for k, v in _load_fast_fund(ticker).items():
+        out.setdefault(k, v)
+    return out
+
+
+def retry_fundamentals() -> None:
+    _load_info.clear()
+    _load_fast_fund.clear()
+    _store()["info_fail"].clear()
 
 
 @st.cache_data(ttl=PRICE_REFRESH, show_spinner=False)
@@ -804,6 +954,7 @@ def range_bar(lo_label: str, hi_label: str, lo, hi, price) -> str:
 def analysis_card(price: float, f: dict, day: dict) -> None:
     if not f and not day:
         st.info("Company numbers aren't available right now. Please try again in a few minutes.")
+        st.button("🔄 Try again", on_click=retry_fundamentals, key="retry_fund_all")
         return
     bars = (range_bar("Today's low", "Today's high", day.get("dayLow"), day.get("dayHigh"), price)
             + range_bar("52-week low", "52-week high", f.get("fiftyTwoWeekLow"), f.get("fiftyTwoWeekHigh"), price))
@@ -816,6 +967,10 @@ def analysis_card(price: float, f: dict, day: dict) -> None:
     roe = roe * 100 if roe is not None else None   # Yahoo gives ROE and margin as fractions (0.15 = 15%)
     pm = pm * 100 if pm is not None else None
     st.markdown("**📋 Fundamentals**")
+    if not any(f.get(k) is not None for k in RATIO_KEYS):
+        st.info("Yahoo Finance didn't send the company ratios (P/B, EPS, return on equity...) this time. "
+                "This happens often with free data on cloud apps. A dash (—) means 'not available', not zero.")
+        st.button("🔄 Try again", on_click=retry_fundamentals, key="retry_fund")
     info_table([
         ("P/B ratio", _num(f.get("priceToBook"), "x", 2),
          "Share price compared with the company's book value (assets minus debts) per share."),
@@ -922,10 +1077,6 @@ def build_chart(df, kind: str, intraday: bool, interval: str, moves: list, heads
     return fig
 
 
-def _stamp(now: datetime) -> str:
-    return f"{now.day} {now:%b}, {now.hour % 12 or 12}:{now:%M} {'am' if now.hour < 12 else 'pm'} IST"
-
-
 def company_explorer(rows: list, stories: list[dict]) -> None:
     st.subheader("🔍 Explore a company")
     pick = st.selectbox("Search or pick a company", [r[0] for r in rows], key="explore")
@@ -933,17 +1084,19 @@ def company_explorer(rows: list, stories: list[dict]) -> None:
     ticker, price, day_pct = row[1], row[2], row[3]
     with st.spinner("Loading company numbers…"):
         fund, day, last_div = load_fundamentals(ticker), load_day_stats(ticker), load_last_dividend(ticker)
+        point_time = last_point_time(ticker)
 
     # Google Finance style header: name, NSE code, big price, change badge and today's rupee change
     prev = price / (1 + day_pct / 100) if day_pct > -99 else price
     cls, arrow = ("up", "↑") if day_pct >= 0 else ("dn", "↓")
+    when = f"Last data point: {_stamp(point_time)}" if point_time else "Time of last data point unavailable"
     st.markdown(f'<div class="gf-head"><div class="gf-title">{html.escape(fund.get("longName") or pick)}</div>'
                 f'<div class="gf-sub">NSE: {html.escape(ticker.replace(".NS", ""))}'
                 + (f' · {html.escape(fund["sector"])}' if fund.get("sector") else "") + '</div>'
                 f'<div class="gf-row"><span><span class="gf-price">{price:,.2f}</span><span class="gf-cur">INR</span></span>'
                 f'<span class="gf-badge {cls}">{arrow} {abs(day_pct):.2f}%</span>'
                 f'<span class="gf-today {cls}">{price - prev:+,.2f} today</span></div>'
-                f'<div class="gf-time">{_stamp(datetime.now(IST))} · {html.escape(market_status())}</div></div>',
+                f'<div class="gf-time">{html.escape(when)} · {html.escape(market_label(point_time))} · source: Yahoo Finance</div></div>',
                 unsafe_allow_html=True)
 
     rng = st.pills("Time range", list(RANGES), selection_mode="single", default="1D", key="range",
@@ -978,10 +1131,15 @@ def company_explorer(rows: list, stories: list[dict]) -> None:
         a.pills("Chart type", ["Line", "Candles"], selection_mode="single", default="Line", key="ctype")
         b.pills("Indicators", ["Volume", "SMA 20", "SMA 50"], selection_mode="multi", default=[], key="ind")
 
+    # P/E: use Yahoo's number; if it is missing but yearly EPS is known, work it out as price / EPS
+    pe, eps = fund.get("trailingPE"), fund.get("trailingEps")
+    pe_label = "P/E ratio"
+    if pe is None and eps and eps > 0:
+        pe, pe_label = price / eps, "P/E (price ÷ EPS)"
     dy = fund["dividendRate"] / price * 100 if fund.get("dividendRate") and price else None
     gf_grid([("Open", _num(day.get("open"), "", 2)), ("High", _num(day.get("dayHigh"), "", 2)),
              ("Low", _num(day.get("dayLow"), "", 2)),
-             ("Mkt cap", _crore(fund.get("marketCap"))), ("P/E ratio", _num(fund.get("trailingPE"), "", 2)),
+             ("Mkt cap", _crore(fund.get("marketCap"))), (pe_label, _num(pe, "", 2)),
              ("52-wk high", _num(fund.get("fiftyTwoWeekHigh"), "", 2)),
              ("Dividend yield", _num(dy, "%", 2)), ("Last dividend", _rs(last_div)),
              ("52-wk low", _num(fund.get("fiftyTwoWeekLow"), "", 2))])
@@ -993,7 +1151,7 @@ def company_explorer(rows: list, stories: list[dict]) -> None:
             label = f"{ts:%d %b %Y} · {'▲' if pct > 0 else '▼'} {pct:+.1f}%"
             if head:
                 st.markdown(f"- **{label}**: [{md_safe(head['title'])}]({safe_url(head['link'])})  \n"
-                            f"  <small>{md_safe(head['publisher'])}</small>", unsafe_allow_html=True)
+                            f"  {small(head['publisher'])}", unsafe_allow_html=True)
             else:
                 st.markdown(f"- **{label}**: no matching headline found from a trusted publisher")
         st.caption("Diamonds on the chart mark these days. The headline is the top news result around that date, "
@@ -1006,8 +1164,8 @@ def company_explorer(rows: list, stories: list[dict]) -> None:
     related = [s for s in stories if pick in s["tags"]][:3]
     st.markdown("**Latest news on this company**" if related else "No recent headlines mention this company.")
     for s in related:
-        st.markdown(f"- [{md_safe(s['title'])}]({safe_url(s['link'])})  \n  <small>{md_safe(s['source'])} · {time_ago(s['ts'])}</small>",
-                    unsafe_allow_html=True)
+        meta = small(s["source"] + " · " + time_ago(s["ts"]))
+        st.markdown(f"- [{md_safe(s['title'])}]({safe_url(s['link'])})  \n  {meta}", unsafe_allow_html=True)
 
 
 # ------------------------------------------------ dividends, splits and bonus
@@ -1035,27 +1193,44 @@ def _action_kind(subject: str) -> str | None:
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def load_corporate_actions() -> list[dict]:
-    """Upcoming dividends, splits and bonus issues from the NSE (next 45 days)."""
+def _fetch_nse_actions() -> list[dict]:
+    """Upcoming dividends, splits and bonus issues from the NSE (next 45 days). Raises on failure (so it is not cached)."""
     today = datetime.now(IST).date()
     url = ("https://www.nseindia.com/api/corporates-corporateActions?index=equities"
            f"&from_date={today:%d-%m-%Y}&to_date={today + timedelta(days=45):%d-%m-%Y}")
+    session = requests.Session()
+    session.headers.update(NSE_HEADERS)
+    session.get("https://www.nseindia.com", timeout=6)  # NSE needs this first to hand out cookies
+    resp = session.get(url, timeout=10)
+    resp.raise_for_status()
     out: list[dict] = []
-    try:
-        session = requests.Session()
-        session.headers.update(NSE_HEADERS)
-        session.get("https://www.nseindia.com", timeout=6)  # NSE needs this first to hand out cookies
-        resp = session.get(url, timeout=10)
-        resp.raise_for_status()
-        for item in resp.json():
-            subject = clean_text(item.get("subject", ""))
-            kind, ex = _action_kind(subject), _nse_date(item.get("exDate"))
-            if kind and ex and ex >= today:
-                out.append({"company": item.get("comp") or item.get("symbol") or "?", "symbol": item.get("symbol", ""),
-                            "kind": kind, "detail": subject, "ex": ex, "record": _nse_date(item.get("recDate"))})
-    except Exception as exc:
-        log.warning("NSE corporate actions failed: %s", exc)
+    for item in resp.json():
+        subject = clean_text(item.get("subject", ""))
+        kind, ex = _action_kind(subject), _nse_date(item.get("exDate"))
+        if kind and ex and ex >= today:
+            out.append({"company": item.get("comp") or item.get("symbol") or "?", "symbol": item.get("symbol", ""),
+                        "kind": kind, "detail": subject, "ex": ex, "record": _nse_date(item.get("recDate"))})
+    if not out:
+        raise ValueError("NSE returned no usable rows")
     return sorted(out, key=lambda a: (a["ex"], a["company"]))
+
+
+def load_corporate_actions() -> list[dict]:
+    """NSE list, or [] if NSE is blocking us. After a failure we pause a few minutes instead of hammering NSE on every visit."""
+    fails = _store()["nse_fail"]
+    if time.time() - fails.get("t", 0) < 300:
+        return []
+    try:
+        return _fetch_nse_actions()
+    except Exception as exc:
+        fails["t"] = time.time()
+        log.warning("NSE corporate actions failed: %s", exc)
+        return []
+
+
+def retry_nse() -> None:
+    _fetch_nse_actions.clear()
+    _store()["nse_fail"].clear()
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -1087,12 +1262,16 @@ def corporate_tab() -> None:
     if not actions:
         st.warning("Couldn't load the NSE list right now. This free source sometimes blocks cloud apps.")
         a, b = st.columns(2)
-        a.button("🔄 Try again", on_click=load_corporate_actions.clear, key="ca_retry")
+        a.button("🔄 Try again", on_click=retry_nse, key="ca_retry")
         if b.button("Show dividends from a backup source", key="ca_backup"):
             st.session_state["ca_use_backup"] = True
         st.link_button("Open the official NSE page ↗", NSE_PAGE)
         if st.session_state.get("ca_use_backup"):
-            actions, source = load_dividend_backup(), "Yahoo Finance (dividends of the large companies tracked here)"
+            with st.spinner("Checking the large companies (about 20 seconds)…"):
+                actions = load_dividend_backup()
+            source = "Yahoo Finance (dividends of the large companies tracked here)"
+            if not actions:
+                st.info("The backup source found no upcoming dividends right now.")
         if not actions:
             return
     kind = st.pills("Type", ["All", "Dividend", "Split", "Bonus"], selection_mode="single", default="All", key="ca_kind") or "All"
@@ -1150,8 +1329,8 @@ def terms_tab(stories: list[dict]) -> None:
     if counts:
         st.subheader("📰 Terms in today's news")
         for name, n in counts.most_common(6):
-            st.markdown(f"**{md_safe(name)}**: {md_safe(meaning[name])}  \n<small>in {n} stor{'y' if n == 1 else 'ies'}</small>",
-                        unsafe_allow_html=True)
+            used = f"in {n} " + ("story" if n == 1 else "stories")
+            st.markdown(f"**{md_safe(name)}**: {md_safe(meaning[name])}  \n{small(used)}", unsafe_allow_html=True)
 
     with st.expander("⏮ Previous days"):
         back = st.slider("Days back", 1, 7, 1, key="terms_back")
@@ -1185,8 +1364,8 @@ def focus_tab(stories: list[dict], prices: dict) -> None:
             if px:
                 st.markdown(f"₹{px[0]:,.2f} :{'green' if px[1] > 0 else 'red'}[{px[1]:+.2f}%]")
             for s in group[:3]:
-                st.markdown(f"- [{md_safe(s['title'])}]({safe_url(s['link'])})  \n  <small>{md_safe(s['source'])} · {time_ago(s['ts'])}</small>",
-                            unsafe_allow_html=True)
+                meta = small(s["source"] + " · " + time_ago(s["ts"]))
+                st.markdown(f"- [{md_safe(s['title'])}]({safe_url(s['link'])})  \n  {meta}", unsafe_allow_html=True)
 
 
 def stat_grid(items: list[tuple]) -> None:
@@ -1208,12 +1387,10 @@ def metrics_row(prices: dict) -> None:
 
 
 def price_status() -> str:
-    ts, open_ = load_data_time(), market_status().startswith("Market open")
+    ts = load_data_time()
     if not ts:
-        return market_status()
-    lag = (datetime.now(IST) - ts).total_seconds() / 60
-    note = f" (about {lag:.0f} min behind the live exchange feed)" if open_ and lag > 2 else ""
-    return f"Latest price data: {ts:%H:%M} IST{note} · {market_status()}"
+        return market_label(None) + " · time of latest data unavailable"
+    return f"Latest price data: {_stamp(ts)} · {market_label(ts)}"
 
 
 @st.fragment(run_every=f"{PRICE_REFRESH}s")
@@ -1232,6 +1409,7 @@ def news_section() -> None:
         st.caption(f"⚠️ Some sources did not respond ({', '.join(failed)}). Showing the rest.")
     if not stories:
         st.error("Couldn't load any news right now. Please tap Refresh now in a minute.")
+        st.button("🔄 Refresh now", on_click=refresh_all, key="retry_news")
         return
     news_tab(apply_filters(stories)[:MAX_STORIES], len(stories))
 
