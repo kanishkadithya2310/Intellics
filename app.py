@@ -1,34 +1,26 @@
-"""Intellics v1.4 beta: Indian markets news, explained simply.
+"""Intellics v1.6 beta: Indian markets news, explained simply.
 
 - Animated background video (the whole picture shows on phones too)
-- Easy navigation: tappable buttons for every section (no side-swiping on a phone)
+- Dashboard-style navigation: a menu in the LEFT SIDEBAR on laptops and tablets, and tappable
+  buttons at the top on phones (they wrap, so nothing is hidden off-screen)
 - Only well-known, reputable news sources (Economic Times, Moneycontrol, Mint, Business Standard,
   BusinessLine, Times of India, Hindustan Times, News18, Dalal Street Journal, HDFC Sky and
   Google News results limited to trusted publishers)
 - Every article gets a 3-4 sentence plain-English summary (free Groq AI, with an
   automatic no-AI fallback so no article is ever left without one)
-- Prices refresh every 30 seconds and show the time of the latest data point
+- Prices refresh every 60 seconds and show the time of the latest data point
 - Company page in the style of Google Finance: big price header, range buttons (1D to Max),
   a smooth area chart with a "previous close" line, hover tooltip, and a clean details grid
   (open, high, low, market cap, P/E, 52-week range, dividend), plus "why it moved" headlines
   on big days and a fundamentals table (P/B, EPS, debt to equity, ROE...)
 - Upcoming dividends, splits and bonus issues
 - 10 financial terms a day (600 unique terms in terms.py, no repeats for 60 days)
+- Sector heatmap, terms quiz, About page, feedback button
 
-v1.4 (polish and reliability, no new features):
-- Pages no longer wait ~25 s for AI summaries (basic summaries show at once, AI ones fill in later)
-- A single slow news feed can no longer hold up the whole page (overall time limit)
-- Failed lookups (fundamentals, NSE list) are no longer remembered for an hour
-- The company header shows the time of the last real data point, not the current clock time
-- Market status notices a trading holiday instead of saying "open"
-- Every article shows its publication time with the IST label, or says it is unavailable
-- Darker video overlay for readable text; video hidden for people who prefer reduced motion
-
-v1.5 (free "premium" touches):
-- Sector heatmap on the Gainers & losers page (colour = today's move, grouped by sector)
-- Terms quiz: 5 questions from the 600-term list, with score and streak
-- About page: sources, update times, how summaries work and known limits
-- Feedback button (set FEEDBACK_URL to your Google Form link) on the About page and in the footer
+v1.6:
+- About 140 companies are tracked (list lives in companies.py)
+- Trading Challenge: a virtual-money competition with a shared leaderboard (code in trading_game.py)
+- Left sidebar menu on laptops and tablets, button menu on phones
 """
 from __future__ import annotations
 
@@ -60,15 +52,18 @@ import yfinance as yf
 from PIL import Image
 from plotly.subplots import make_subplots
 
+import trading_game  # trading_game.py must sit next to app.py
+from companies import COMPANIES, SECTORS  # companies.py must sit next to app.py
+
 try:
     from terms import TERMS  # terms.py must sit next to app.py
 except Exception:  # keep the app alive even if the file is missing
     TERMS = []
 
 # ----------------------------------------------------------------- settings
-VERSION = "1.5 beta"
+VERSION = "1.6 beta"
 NEWS_REFRESH = 120   # seconds between news refreshes
-PRICE_REFRESH = 30   # seconds between price refreshes (as fast as the free source allows)
+PRICE_REFRESH = 60   # seconds between price refreshes (60 because many companies are tracked)
 MAX_STORIES = 40
 FEED_DEADLINE = 14   # seconds: stop waiting for slow news feeds after this long
 SUMMARY_WAIT = 6     # seconds to wait for AI summaries before showing the basic ones
@@ -130,37 +125,7 @@ def trusted_publisher(name: str) -> bool:
 
 INDICES = {"Sensex": "^BSESN", "Nifty 50": "^NSEI", "Brent crude (USD/bbl)": "BZ=F", "Gold (USD/oz)": "GC=F"}
 
-COMPANIES = {  # name -> (Yahoo ticker, alias regexes; short ALL-CAPS aliases match case-sensitively)
-    "TCS": ("TCS.NS", ["TCS", "Tata Consultancy"]), "Infosys": ("INFY.NS", ["Infosys"]),
-    "HCL Tech": ("HCLTECH.NS", ["HCL Tech", "HCLTech", "HCL Technologies"]), "Wipro": ("WIPRO.NS", ["Wipro"]),
-    "Tech Mahindra": ("TECHM.NS", ["Tech Mahindra"]), "Reliance": ("RELIANCE.NS", ["Reliance(?! on\\b)"]),
-    "HDFC Bank": ("HDFCBANK.NS", ["HDFC Bank"]), "ICICI Bank": ("ICICIBANK.NS", ["ICICI Bank"]),
-    "SBI": ("SBIN.NS", ["SBI(?! Life| Cards)", "State Bank of India"]), "SBI Life": ("SBILIFE.NS", ["SBI Life"]),
-    "Kotak Bank": ("KOTAKBANK.NS", ["Kotak Mahindra Bank", "Kotak Bank"]), "Axis Bank": ("AXISBANK.NS", ["Axis Bank"]),
-    "ITC": ("ITC.NS", ["ITC(?! Hotels)"]), "L&T": ("LT.NS", ["Larsen", "L&T"]),
-    "Tata Motors": ("TATAMOTORS.NS", ["Tata Motors"]), "Tata Steel": ("TATASTEEL.NS", ["Tata Steel"]),
-    "Tata Power": ("TATAPOWER.NS", ["Tata Power"]), "Adani Ports": ("ADANIPORTS.NS", ["Adani Ports"]),
-    "Adani Enterprises": ("ADANIENT.NS", ["Adani Enterprises"]), "Airtel": ("BHARTIARTL.NS", ["Airtel"]),
-    "Maruti": ("MARUTI.NS", ["Maruti"]), "M&M": ("M&M.NS", ["M&M", "Mahindra & Mahindra"]),
-    "Sun Pharma": ("SUNPHARMA.NS", ["Sun Pharma"]), "HUL": ("HINDUNILVR.NS", ["Hindustan Unilever", "HUL"]),
-    "Asian Paints": ("ASIANPAINT.NS", ["Asian Paints"]), "Bajaj Finance": ("BAJFINANCE.NS", ["Bajaj Finance"]),
-    "Titan": ("TITAN.NS", ["Titan"]), "JSW Steel": ("JSWSTEEL.NS", ["JSW Steel"]), "ONGC": ("ONGC.NS", ["ONGC"]),
-    "NTPC": ("NTPC.NS", ["NTPC"]), "Power Grid": ("POWERGRID.NS", ["Power Grid"]),
-    "Coal India": ("COALINDIA.NS", ["Coal India"]), "BEL": ("BEL.NS", ["BEL", "Bharat Electronics"]),
-    "Polycab": ("POLYCAB.NS", ["Polycab"]),
-}
-SECTORS = {  # our own simple grouping, used only for the heatmap
-    "TCS": "IT", "Infosys": "IT", "HCL Tech": "IT", "Wipro": "IT", "Tech Mahindra": "IT",
-    "HDFC Bank": "Banks", "ICICI Bank": "Banks", "SBI": "Banks", "Kotak Bank": "Banks", "Axis Bank": "Banks",
-    "SBI Life": "Finance", "Bajaj Finance": "Finance",
-    "Reliance": "Oil & gas", "ONGC": "Oil & gas",
-    "ITC": "FMCG", "HUL": "FMCG", "Asian Paints": "Consumer", "Titan": "Consumer",
-    "Tata Motors": "Auto", "Maruti": "Auto", "M&M": "Auto",
-    "Tata Steel": "Metals & mining", "JSW Steel": "Metals & mining", "Coal India": "Metals & mining",
-    "Tata Power": "Power", "NTPC": "Power", "Power Grid": "Power",
-    "L&T": "Infrastructure", "Adani Ports": "Infrastructure", "Adani Enterprises": "Infrastructure",
-    "Airtel": "Telecom", "Sun Pharma": "Pharma", "BEL": "Defence", "Polycab": "Industrials",
-}
+# COMPANIES (name -> (Yahoo ticker, alias patterns)) and SECTORS now come from companies.py
 TOPICS = {
     "Markets": ["sensex", "nifty", "stock market", "shares", "stocks", "bse", "nse", "ipo", "sebi", "fii", "fpi"],
     "Economy & RBI": ["rbi", "repo", "inflation", "gdp", "rate hike", "rate cut", "fiscal", "budget", "rupee", "economy", "gst"],
@@ -227,7 +192,8 @@ try:
     PAGE_ICON = Image.open(LOGO_PATH)
 except Exception:
     PAGE_ICON = "📈"
-st.set_page_config(page_title="Intellics Committee", page_icon=PAGE_ICON, layout="wide", initial_sidebar_state="collapsed")
+# "auto" = sidebar open on laptops/tablets, folded away on phones (phones get the top buttons instead)
+st.set_page_config(page_title="Intellics Committee", page_icon=PAGE_ICON, layout="wide", initial_sidebar_state="auto")
 
 
 def _compile(alias: str) -> re.Pattern:
@@ -561,8 +527,8 @@ div[class*="st-key-card_"]:hover{{transform:translateY(-3px);border-color:rgba(1
 .mood{{height:12px;border-radius:99px;overflow:hidden;background:#ef4444;margin:.3rem 0 .2rem}}
 .mood>div{{height:100%;background:#22c55e;transition:width .6s}}
 button{{min-height:44px;border-radius:12px!important}}
-.st-key-nav div{{flex-wrap:wrap!important}}
-.st-key-nav button{{min-height:46px;font-weight:600;padding:0 16px}}
+.st-key-topnav div{{flex-wrap:wrap!important}}
+.st-key-topnav button{{min-height:46px;font-weight:600;padding:0 16px}}
 .stat-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:.4rem 0 .6rem}}
 .stat{{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:14px;padding:10px 12px;backdrop-filter:blur(8px)}}
 .stat .l{{font-size:.74rem;opacity:.78;letter-spacing:.02em}}
@@ -591,6 +557,9 @@ button{{min-height:44px;border-radius:12px!important}}
 .rb .ends{{display:flex;justify-content:space-between;font-size:.8rem;opacity:.9;line-height:1.35}}
 .rb .track{{position:relative;height:6px;border-radius:99px;background:linear-gradient(90deg,#ef4444,#f59e0b,#22c55e);margin:8px 0 2px}}
 .rb .dot{{position:absolute;top:-5px;width:16px;height:16px;border-radius:50%;background:#fff;border:3px solid #0a0f1f;transform:translateX(-50%);box-sizing:border-box}}
+/* phones: sidebar hidden (the top buttons are used instead). laptops and tablets: top buttons hidden (the sidebar is used) */
+@media (max-width:768px){{[data-testid="stSidebar"],[data-testid="stSidebarCollapsedControl"],[data-testid="collapsedControl"]{{display:none!important}}}}
+@media (min-width:769px){{.st-key-topnav{{display:none!important}}}}
 @media (max-width:640px){{.hero-title{{font-size:1.25rem;letter-spacing:.06em}}.brand img{{height:56px!important;width:56px!important}}
 .block-container{{padding-left:.9rem;padding-right:.9rem}}.stat-grid{{grid-template-columns:repeat(2,1fr)}}.stat .v{{font-size:1.1rem}}
 .ftab{{grid-template-columns:1fr}}.gf{{grid-auto-flow:row;grid-template-rows:none;grid-template-columns:1fr}}
@@ -743,7 +712,7 @@ def sector_heatmap(rows: list) -> None:
         marker=dict(colors=colors, cmin=-limit, cmax=limit, cmid=0, line=dict(width=1, color="#0a0f1f"),
                     colorscale=[[0, "#ef4444"], [0.5, "#334155"], [1, "#22c55e"]]),
         pathbar=dict(visible=False)))
-    fig.update_layout(height=380, margin=dict(l=0, r=0, t=0, b=0), paper_bgcolor="rgba(0,0,0,0)",
+    fig.update_layout(height=560, margin=dict(l=0, r=0, t=0, b=0), paper_bgcolor="rgba(0,0,0,0)",
                       font_color="#f8fafc", dragmode=False)
     st.subheader("🗺️ Sector heatmap")
     st.plotly_chart(fig, **PLOT_KW, config={"displayModeBar": False})
@@ -1125,7 +1094,7 @@ def build_chart(df, kind: str, intraday: bool, interval: str, moves: list, heads
 
 def company_explorer(rows: list, stories: list[dict]) -> None:
     st.subheader("🔍 Explore a company")
-    pick = st.selectbox("Search or pick a company", [r[0] for r in rows], key="explore")
+    pick = st.selectbox("Search or pick a company", sorted([r[0] for r in rows]), key="explore")
     row = next(r for r in rows if r[0] == pick)
     ticker, price, day_pct = row[1], row[2], row[3]
     with st.spinner("Loading company numbers…"):
@@ -1313,7 +1282,7 @@ def corporate_tab() -> None:
             st.session_state["ca_use_backup"] = True
         st.link_button("Open the official NSE page ↗", NSE_PAGE)
         if st.session_state.get("ca_use_backup"):
-            with st.spinner("Checking the large companies (about 20 seconds)…"):
+            with st.spinner("Checking the large companies (this can take up to a minute)…"):
                 actions = load_dividend_backup()
             source = "Yahoo Finance (dividends of the large companies tracked here)"
             if not actions:
@@ -1489,10 +1458,11 @@ def about_tab() -> None:
                 "Either way it can miss details, so please open the original article.")
     st.markdown("**Known limits**")
     st.markdown("- Free data can be delayed, incomplete or briefly unavailable. A dash (—) means *not available*, not zero.\n"
-                "- Only about 33 large companies are tracked, not the whole market.\n"
+                f"- About {len(COMPANIES)} large companies are tracked, not the whole market.\n"
+                "- The Trading Challenge uses play money and delayed prices. It is a game, not advice.\n"
                 "- Nothing here is investment advice. See the disclaimer below.")
-    st.markdown(f"**What's new in {VERSION}:** sector heatmap, terms quiz, this About page. "
-                "Earlier: faster page loads, clearer data times, holiday-aware market status.")
+    st.markdown(f"**What's new in {VERSION}:** Trading Challenge, many more companies, a left sidebar menu, "
+                "sector heatmap, terms quiz, this About page.")
     if FEEDBACK_URL:
         st.link_button("Found a problem or have an idea? Tell us", FEEDBACK_URL)
     else:
@@ -1586,20 +1556,59 @@ Intellics is a student learning project made for educational purposes only. Noth
 
 # ------------------------------------------------------------- navigation
 PAGES = {"news": "📰 News", "movers": "📈 Gainers & losers", "focus": "🔥 Stocks in focus",
-         "actions": "📅 Dividends & splits", "terms": "📚 Financial terms", "quiz": "🎯 Quiz", "about": "ℹ️ About"}
+         "actions": "📅 Dividends & splits", "terms": "📚 Financial terms", "quiz": "🎯 Quiz",
+         "game": "🏆 Trading game", "about": "ℹ️ About"}
+
+SIDEBAR_CSS = """<style>
+[data-testid="stSidebar"]{background:rgba(10,15,31,.94);border-right:1px solid rgba(255,255,255,.08)}
+[data-testid="stSidebar"] [role="radiogroup"]{gap:4px}
+[data-testid="stSidebar"] [role="radiogroup"] label{padding:10px 12px;border-radius:10px;width:100%;cursor:pointer}
+[data-testid="stSidebar"] [role="radiogroup"] label:hover{background:rgba(255,255,255,.07)}
+[data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked){background:rgba(109,74,255,.28)}
+[data-testid="stSidebar"] [role="radiogroup"] label>div:first-child{display:none}
+.side-brand{font-weight:800;letter-spacing:.1em;font-size:1.1rem;margin:.2rem 0 .8rem}
+.side-brand small{display:block;font-weight:400;letter-spacing:.02em;opacity:.7;font-size:.75rem}
+</style>"""
+
+
+def _side_changed() -> None:
+    st.session_state["nav_top"] = st.session_state["nav_side"]
+
+
+def _top_changed() -> None:
+    ss = st.session_state
+    if ss.get("nav_top"):                 # tapping the chosen button again would clear it, so keep the old page then
+        ss["nav_side"] = ss["nav_top"]
+    ss["nav_top"] = ss["nav_side"]
 
 
 def navigation() -> str:
-    """Tappable buttons for every section. They wrap onto several lines on a phone, so nothing is hidden off-screen.
-    The chosen page is also stored in the web address (?page=terms), so a section can be bookmarked or shared."""
+    """Laptops and tablets: a menu in the left sidebar (like a dashboard). Phones: tappable buttons at the top
+    that wrap onto several lines, so nothing is hidden off-screen. Both menus stay in step with each other, and the
+    chosen page is stored in the web address (?page=terms), so a section can be bookmarked or shared."""
+    ss = st.session_state
     labels, slugs = list(PAGES.values()), {v: k for k, v in PAGES.items()}
-    start = PAGES.get(str(st.query_params.get("page") or ""), labels[0])
-    pick = st.pills("Go to", labels, selection_mode="single", default=start, key="nav", label_visibility="collapsed")
-    pick = pick or st.session_state.get("last_nav") or start  # tapping the chosen button again keeps the same page
-    st.session_state["last_nav"] = pick
-    if st.query_params.get("page") != slugs[pick]:
-        st.query_params["page"] = slugs[pick]
-    return slugs[pick]
+    if ss.get("nav_side") not in labels:
+        ss["nav_side"] = PAGES.get(str(st.query_params.get("page") or ""), labels[0])
+    if ss.get("nav_top") not in labels:
+        ss["nav_top"] = ss["nav_side"]
+    st.markdown(SIDEBAR_CSS, unsafe_allow_html=True)
+    with st.sidebar:
+        st.markdown(f'<div class="side-brand">📊 {html.escape(ORG_NAME.split()[0].upper())}<small>{html.escape(TAGLINE)}</small></div>',
+                    unsafe_allow_html=True)
+        st.radio("Go to", labels, key="nav_side", label_visibility="collapsed", on_change=_side_changed)
+    with st.container(key="topnav"):
+        st.pills("Go to", labels, selection_mode="single", key="nav_top", label_visibility="collapsed", on_change=_top_changed)
+    page = slugs[ss["nav_side"]]
+    if st.query_params.get("page") != page:
+        st.query_params["page"] = page
+    return page
+
+
+def game_page() -> None:
+    """The Trading Challenge page (code lives in trading_game.py)."""
+    trading_game.game_tab({n: tk for n, (tk, _) in COMPANIES.items()},
+                          lambda: load_prices(all_tickers()), INDICES["Nifty 50"])
 
 
 def main() -> None:
@@ -1622,6 +1631,8 @@ def main() -> None:
         terms_tab(load_news()[0])
     elif page == "quiz":
         quiz_tab()
+    elif page == "game":
+        game_page()
     else:
         about_tab()
     st.divider()
