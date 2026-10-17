@@ -1,0 +1,179 @@
+"""Companies tracked by Intellics (roughly the Nifty 100 plus a few popular names).
+
+To ADD a company, add one line to _TABLE:
+    ("Display name", "YAHOO.NS", "Sector", [optional list of headline-matching patterns])
+
+- The Yahoo ticker is the NSE symbol followed by .NS (for example TCS.NS).
+- If you leave out the patterns, the display name itself is used to spot the company in news headlines.
+- Short ALL-CAPS patterns (up to 5 letters) are matched case-sensitively, so "SAIL" will not match "sail".
+- A company whose ticker returns no data is simply skipped by the app, so a wrong ticker is harmless.
+"""
+import re
+
+_TABLE = [
+    # ---- IT ----
+    ("TCS", "TCS.NS", "IT", ["TCS", "Tata Consultancy"]),
+    ("Infosys", "INFY.NS", "IT", None),
+    ("HCL Tech", "HCLTECH.NS", "IT", ["HCL Tech", "HCLTech", "HCL Technologies"]),
+    ("Wipro", "WIPRO.NS", "IT", None),
+    ("Tech Mahindra", "TECHM.NS", "IT", None),
+    ("LTIMindtree", "LTIM.NS", "IT", ["LTIMindtree", "LTI Mindtree"]),
+    ("Persistent Systems", "PERSISTENT.NS", "IT", None),
+    ("Coforge", "COFORGE.NS", "IT", None),
+    ("Mphasis", "MPHASIS.NS", "IT", None),
+    ("Tata Elxsi", "TATAELXSI.NS", "IT", None),
+    # ---- Banks ----
+    ("HDFC Bank", "HDFCBANK.NS", "Banks", None),
+    ("ICICI Bank", "ICICIBANK.NS", "Banks", None),
+    ("SBI", "SBIN.NS", "Banks", ["SBI(?! Life| Cards)", "State Bank of India"]),
+    ("Kotak Bank", "KOTAKBANK.NS", "Banks", ["Kotak Mahindra Bank", "Kotak Bank"]),
+    ("Axis Bank", "AXISBANK.NS", "Banks", None),
+    ("IndusInd Bank", "INDUSINDBK.NS", "Banks", None),
+    ("Bank of Baroda", "BANKBARODA.NS", "Banks", None),
+    ("PNB", "PNB.NS", "Banks", ["PNB", "Punjab National Bank"]),
+    ("Canara Bank", "CANBK.NS", "Banks", None),
+    ("Union Bank", "UNIONBANK.NS", "Banks", ["Union Bank of India"]),
+    ("IDFC First Bank", "IDFCFIRSTB.NS", "Banks", ["IDFC First"]),
+    ("Yes Bank", "YESBANK.NS", "Banks", None),
+    ("AU Small Finance Bank", "AUBANK.NS", "Banks", ["AU Small Finance"]),
+    ("Federal Bank", "FEDERALBNK.NS", "Banks", None),
+    ("Indian Bank", "INDIANB.NS", "Banks", None),
+    # ---- Finance and insurance ----
+    ("Bajaj Finance", "BAJFINANCE.NS", "Finance", None),
+    ("Bajaj Finserv", "BAJAJFINSV.NS", "Finance", None),
+    ("Shriram Finance", "SHRIRAMFIN.NS", "Finance", None),
+    ("Jio Financial", "JIOFIN.NS", "Finance", ["Jio Financial", "JFSL"]),
+    ("Cholamandalam", "CHOLAFIN.NS", "Finance", ["Cholamandalam", "Chola Investment"]),
+    ("Muthoot Finance", "MUTHOOTFIN.NS", "Finance", None),
+    ("REC", "RECLTD.NS", "Finance", ["REC(?= Ltd| Limited| share| stock)", "Rural Electrification"]),
+    ("PFC", "PFC.NS", "Finance", ["PFC", "Power Finance Corporation"]),
+    ("IRFC", "IRFC.NS", "Finance", None),
+    ("HDFC AMC", "HDFCAMC.NS", "Finance", None),
+    ("SBI Cards", "SBICARD.NS", "Finance", None),
+    ("SBI Life", "SBILIFE.NS", "Finance", None),
+    ("HDFC Life", "HDFCLIFE.NS", "Finance", None),
+    ("ICICI Prudential Life", "ICICIPRULI.NS", "Finance", ["ICICI Prudential Life", "ICICI Pru Life"]),
+    ("ICICI Lombard", "ICICIGI.NS", "Finance", None),
+    ("LIC", "LICI.NS", "Finance", ["LIC(?! Housing)", "Life Insurance Corporation"]),
+    # ---- Oil and gas ----
+    ("Reliance", "RELIANCE.NS", "Oil & gas", ["Reliance(?! on\\b)"]),
+    ("ONGC", "ONGC.NS", "Oil & gas", None),
+    ("IOC", "IOC.NS", "Oil & gas", ["Indian Oil", "IOC"]),
+    ("BPCL", "BPCL.NS", "Oil & gas", ["BPCL", "Bharat Petroleum"]),
+    ("GAIL", "GAIL.NS", "Oil & gas", None),
+    ("Oil India", "OIL.NS", "Oil & gas", None),
+    # ---- FMCG ----
+    ("ITC", "ITC.NS", "FMCG", ["ITC(?! Hotels)"]),
+    ("HUL", "HINDUNILVR.NS", "FMCG", ["Hindustan Unilever", "HUL"]),
+    ("Nestle India", "NESTLEIND.NS", "FMCG", ["Nestle India", "Nestl\u00e9 India"]),
+    ("Britannia", "BRITANNIA.NS", "FMCG", None),
+    ("Tata Consumer", "TATACONSUM.NS", "FMCG", None),
+    ("Dabur", "DABUR.NS", "FMCG", None),
+    ("Godrej Consumer", "GODREJCP.NS", "FMCG", None),
+    ("Marico", "MARICO.NS", "FMCG", None),
+    ("Colgate-Palmolive India", "COLPAL.NS", "FMCG", ["Colgate[- ]Palmolive"]),
+    ("Varun Beverages", "VBL.NS", "FMCG", None),
+    ("United Spirits", "UNITDSPR.NS", "FMCG", None),
+    # ---- Consumer and retail ----
+    ("Asian Paints", "ASIANPAINT.NS", "Consumer", None),
+    ("Titan", "TITAN.NS", "Consumer", None),
+    ("Pidilite", "PIDILITIND.NS", "Consumer", None),
+    ("Trent", "TRENT.NS", "Consumer", ["Trent(?= Ltd| Limited| share| stock| Q[1-4])"]),
+    ("Avenue Supermarts", "DMART.NS", "Consumer", ["Avenue Supermarts", "DMart"]),
+    ("Havells", "HAVELLS.NS", "Consumer", None),
+    ("Page Industries", "PAGEIND.NS", "Consumer", None),
+    ("Berger Paints", "BERGEPAINT.NS", "Consumer", None),
+    ("Indian Hotels", "INDHOTEL.NS", "Consumer", None),
+    ("Jubilant FoodWorks", "JUBLFOOD.NS", "Consumer", None),
+    ("Voltas", "VOLTAS.NS", "Consumer", None),
+    # ---- Internet and services ----
+    ("Eternal", "ETERNAL.NS", "Internet & services", ["Zomato", "Eternal(?= Ltd| Limited| share| stock)"]),
+    ("Swiggy", "SWIGGY.NS", "Internet & services", None),
+    ("Nykaa", "NYKAA.NS", "Internet & services", ["Nykaa", "FSN E-Commerce"]),
+    ("Paytm", "PAYTM.NS", "Internet & services", ["Paytm", "One97"]),
+    ("Info Edge", "NAUKRI.NS", "Internet & services", ["Info Edge", "Naukri"]),
+    ("Delhivery", "DELHIVERY.NS", "Internet & services", None),
+    ("IRCTC", "IRCTC.NS", "Internet & services", None),
+    # ---- Auto ----
+    ("Maruti", "MARUTI.NS", "Auto", None),
+    ("M&M", "M&M.NS", "Auto", ["M&M", "Mahindra & Mahindra"]),
+    # Tata Motors split in October 2025: the old TATAMOTORS symbol became TMPV (passenger vehicles)
+    # and the commercial-vehicle business trades separately as TMCV.
+    ("Tata Motors", "TMPV.NS", "Auto", ["Tata Motors(?! Commercial| CV)", "TMPV", "Tata Motors Passenger"]),
+    ("Tata Motors CV", "TMCV.NS", "Auto", ["TMCV", "TMLCV", "Tata Motors Commercial", "Tata Motors CV"]),
+    ("Bajaj Auto", "BAJAJ-AUTO.NS", "Auto", None),
+    ("Eicher Motors", "EICHERMOT.NS", "Auto", ["Eicher Motors", "Royal Enfield"]),
+    ("Hero MotoCorp", "HEROMOTOCO.NS", "Auto", None),
+    ("TVS Motor", "TVSMOTOR.NS", "Auto", None),
+    ("Ashok Leyland", "ASHOKLEY.NS", "Auto", None),
+    ("Bosch", "BOSCHLTD.NS", "Auto", ["Bosch(?= Ltd| Limited| India| share| stock)"]),
+    ("Motherson", "MOTHERSON.NS", "Auto", ["Motherson"]),
+    ("Hyundai Motor India", "HYUNDAI.NS", "Auto", ["Hyundai Motor India", "Hyundai India"]),
+    # ---- Metals and mining ----
+    ("Tata Steel", "TATASTEEL.NS", "Metals & mining", None),
+    ("JSW Steel", "JSWSTEEL.NS", "Metals & mining", None),
+    ("Hindalco", "HINDALCO.NS", "Metals & mining", None),
+    ("Coal India", "COALINDIA.NS", "Metals & mining", None),
+    ("Jindal Steel", "JINDALSTEL.NS", "Metals & mining", None),
+    ("NMDC", "NMDC.NS", "Metals & mining", None),
+    ("SAIL", "SAIL.NS", "Metals & mining", ["SAIL", "Steel Authority"]),
+    ("Hindustan Zinc", "HINDZINC.NS", "Metals & mining", None),
+    # ---- Power ----
+    ("NTPC", "NTPC.NS", "Power", None),
+    ("Power Grid", "POWERGRID.NS", "Power", None),
+    ("Tata Power", "TATAPOWER.NS", "Power", None),
+    ("Adani Power", "ADANIPOWER.NS", "Power", None),
+    ("Adani Green", "ADANIGREEN.NS", "Power", None),
+    ("Adani Energy Solutions", "ADANIENSOL.NS", "Power", None),
+    ("JSW Energy", "JSWENERGY.NS", "Power", None),
+    ("NHPC", "NHPC.NS", "Power", None),
+    # ---- Infrastructure, cement and real estate ----
+    ("L&T", "LT.NS", "Infrastructure", ["Larsen", "L&T"]),
+    ("Adani Ports", "ADANIPORTS.NS", "Infrastructure", None),
+    ("Adani Enterprises", "ADANIENT.NS", "Infrastructure", None),
+    ("UltraTech Cement", "ULTRACEMCO.NS", "Infrastructure", ["UltraTech"]),
+    ("Grasim", "GRASIM.NS", "Infrastructure", None),
+    ("Ambuja Cements", "AMBUJACEM.NS", "Infrastructure", ["Ambuja"]),
+    ("Shree Cement", "SHREECEM.NS", "Infrastructure", None),
+    ("DLF", "DLF.NS", "Infrastructure", None),
+    ("Lodha", "LODHA.NS", "Infrastructure", ["Lodha", "Macrotech"]),
+    ("Godrej Properties", "GODREJPROP.NS", "Infrastructure", None),
+    ("IndiGo", "INDIGO.NS", "Infrastructure", ["IndiGo", "InterGlobe Aviation"]),
+    # ---- Industrials and defence ----
+    ("Siemens", "SIEMENS.NS", "Industrials", None),
+    ("ABB India", "ABB.NS", "Industrials", None),
+    ("Polycab", "POLYCAB.NS", "Industrials", None),
+    ("Cummins India", "CUMMINSIND.NS", "Industrials", None),
+    ("CG Power", "CGPOWER.NS", "Industrials", None),
+    ("Bharat Forge", "BHARATFORGE.NS", "Industrials", None),
+    ("Dixon Technologies", "DIXON.NS", "Industrials", ["Dixon Technologies", "Dixon Tech"]),
+    ("SRF", "SRF.NS", "Industrials", None),
+    ("UPL", "UPL.NS", "Industrials", None),
+    ("BEL", "BEL.NS", "Defence", ["BEL", "Bharat Electronics"]),
+    ("HAL", "HAL.NS", "Defence", ["HAL(?= share| stock| Ltd)", "Hindustan Aeronautics"]),
+    ("Mazagon Dock", "MAZDOCK.NS", "Defence", None),
+    # ---- Pharma and healthcare ----
+    ("Sun Pharma", "SUNPHARMA.NS", "Pharma & health", None),
+    ("Cipla", "CIPLA.NS", "Pharma & health", None),
+    ("Dr Reddy's", "DRREDDY.NS", "Pharma & health", ["Dr\\.? Reddy"]),
+    ("Divi's Labs", "DIVISLAB.NS", "Pharma & health", ["Divi'?s Lab"]),
+    ("Lupin", "LUPIN.NS", "Pharma & health", None),
+    ("Zydus Lifesciences", "ZYDUSLIFE.NS", "Pharma & health", ["Zydus"]),
+    ("Torrent Pharma", "TORNTPHARM.NS", "Pharma & health", None),
+    ("Mankind Pharma", "MANKIND.NS", "Pharma & health", None),
+    ("Aurobindo Pharma", "AUROPHARMA.NS", "Pharma & health", ["Aurobindo"]),
+    ("Apollo Hospitals", "APOLLOHOSP.NS", "Pharma & health", None),
+    ("Max Healthcare", "MAXHEALTH.NS", "Pharma & health", None),
+    # ---- Telecom ----
+    ("Airtel", "BHARTIARTL.NS", "Telecom", None),
+    ("Vodafone Idea", "IDEA.NS", "Telecom", None),
+    ("Indus Towers", "INDUSTOWER.NS", "Telecom", None),
+]
+
+# name -> (Yahoo ticker, list of headline patterns). Same shape app.py always used.
+COMPANIES = {name: (ticker, aliases or [re.escape(name)]) for name, ticker, _sector, aliases in _TABLE}
+# name -> sector, used by the heatmap
+SECTORS = {name: sector for name, _ticker, sector, _aliases in _TABLE}
+
+if len(COMPANIES) != len(_TABLE):  # two rows with the same display name: the second would hide the first
+    raise ValueError("companies.py has a duplicate company name")
