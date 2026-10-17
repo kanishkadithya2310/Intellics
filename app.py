@@ -3,6 +3,8 @@
 - Animated background video (the whole picture shows on phones too)
 - Dashboard-style navigation: a menu in the LEFT SIDEBAR on laptops and tablets, and tappable
   buttons at the top on phones (they wrap, so nothing is hidden off-screen)
+- Four menu items: News, Markets (gainers and losers, stocks in focus, dividends and splits),
+  Learn (financial terms, quiz) and Trading game. About sits in a small section above the disclaimer.
 - Only well-known, reputable news sources (Economic Times, Moneycontrol, Mint, Business Standard,
   BusinessLine, Times of India, Hindustan Times, News18, Dalal Street Journal, HDFC Sky and
   Google News results limited to trusted publishers)
@@ -15,7 +17,7 @@
   on big days and a fundamentals table (P/B, EPS, debt to equity, ROE...)
 - Upcoming dividends, splits and bonus issues
 - 10 financial terms a day (600 unique terms in terms.py, no repeats for 60 days)
-- Sector heatmap, terms quiz, About page, feedback button
+- Sector heatmap, terms quiz, About section, feedback button
 
 v1.6:
 - About 140 companies are tracked (list lives in companies.py)
@@ -557,8 +559,8 @@ button{{min-height:44px;border-radius:12px!important}}
 .rb .ends{{display:flex;justify-content:space-between;font-size:.8rem;opacity:.9;line-height:1.35}}
 .rb .track{{position:relative;height:6px;border-radius:99px;background:linear-gradient(90deg,#ef4444,#f59e0b,#22c55e);margin:8px 0 2px}}
 .rb .dot{{position:absolute;top:-5px;width:16px;height:16px;border-radius:50%;background:#fff;border:3px solid #0a0f1f;transform:translateX(-50%);box-sizing:border-box}}
-/* phones: sidebar hidden (the top buttons are used instead). laptops and tablets: top buttons hidden (the sidebar is used) */
-@media (max-width:768px){{[data-testid="stSidebar"],[data-testid="stSidebarCollapsedControl"],[data-testid="collapsedControl"]{{display:none!important}}}}
+/* phones: sidebar and its open/close arrows hidden (the top buttons are used instead). laptops and tablets: top buttons hidden (the sidebar is used) */
+@media (max-width:768px){{[data-testid="stSidebar"],[data-testid="stSidebarCollapsedControl"],[data-testid="collapsedControl"],[data-testid="stExpandSidebarButton"],[data-testid="stSidebarCollapseButton"],[data-testid="stSidebarHeader"]{{display:none!important}}}}
 @media (min-width:769px){{.st-key-topnav{{display:none!important}}}}
 @media (max-width:640px){{.hero-title{{font-size:1.25rem;letter-spacing:.06em}}.brand img{{height:56px!important;width:56px!important}}
 .block-container{{padding-left:.9rem;padding-right:.9rem}}.stat-grid{{grid-template-columns:repeat(2,1fr)}}.stat .v{{font-size:1.1rem}}
@@ -604,8 +606,8 @@ def logo_html() -> str:
 
 def header() -> None:
     st.markdown(f'<div class="brand">{logo_html()}<div><div class="hero-title">{ORG_NAME}</div>'
-                f'<div class="hero-sub" style="margin:.15rem 0 0">{ORG_SUBTITLE} · {TAGLINE}</div></div></div>'
-                '<div class="hero-sub">Indian market news and prices, in plain English.</div>', unsafe_allow_html=True)
+                f'<div class="hero-sub" style="margin:.15rem 0 0">{ORG_SUBTITLE} · {TAGLINE}</div></div></div>',
+                unsafe_allow_html=True)
 
 
 def mood_bar(rows: list) -> None:
@@ -634,7 +636,6 @@ def refresh_all() -> None:
 
 
 def filter_bar() -> None:
-    st.pills("Topic", ["All", *TOPICS], selection_mode="single", default="All", key="topic", label_visibility="collapsed")
     st.text_input("Search", key="query", placeholder="🔎 Search headlines, e.g. RBI, Reliance, gold", label_visibility="collapsed")
     with st.expander("More filters"):
         st.toggle("Only today's stories", key="today_only")
@@ -687,7 +688,6 @@ def news_tab(items: list[dict], total: int) -> None:
         st.info("No stories match your filters.")
         st.button("Reset filters", on_click=reset_filters, key="reset_empty")
         return
-    st.caption(f"Showing {len(items)} stories ({total} loaded)")
     with st.spinner("Loading summaries…"):
         summaries = get_summaries(items)
     for s in items:
@@ -1525,8 +1525,6 @@ def price_bar() -> None:
 def news_section() -> None:
     stories, failed, fetched_at = load_news()
     st.caption(f"News updated {fetched_at:%H:%M:%S} IST · refreshes every {NEWS_REFRESH // 60} min · trusted sources only")
-    if failed:
-        st.caption(f"⚠️ Some sources did not respond ({', '.join(failed)}). Showing the rest.")
     if not stories:
         st.error("Couldn't load any news right now. Please tap Refresh now in a minute.")
         st.button("🔄 Refresh now", on_click=refresh_all, key="retry_news")
@@ -1555,9 +1553,7 @@ Intellics is a student learning project made for educational purposes only. Noth
 - This project is provided as is, without any guarantee, and the creators accept no liability for any loss arising from its use."""
 
 # ------------------------------------------------------------- navigation
-PAGES = {"news": "📰 News", "movers": "📈 Gainers & losers", "focus": "🔥 Stocks in focus",
-         "actions": "📅 Dividends & splits", "terms": "📚 Financial terms", "quiz": "🎯 Quiz",
-         "game": "🏆 Trading game", "about": "ℹ️ About"}
+PAGES = {"news": "📰 News", "markets": "📈 Markets", "learn": "🎓 Learn", "game": "🏆 Trading game"}
 
 SIDEBAR_CSS = """<style>
 [data-testid="stSidebar"]{background:rgba(10,15,31,.94);border-right:1px solid rgba(255,255,255,.08)}
@@ -1585,7 +1581,7 @@ def _top_changed() -> None:
 def navigation() -> str:
     """Laptops and tablets: a menu in the left sidebar (like a dashboard). Phones: tappable buttons at the top
     that wrap onto several lines, so nothing is hidden off-screen. Both menus stay in step with each other, and the
-    chosen page is stored in the web address (?page=terms), so a section can be bookmarked or shared."""
+    chosen page is stored in the web address (?page=learn), so a section can be bookmarked or shared."""
     ss = st.session_state
     labels, slugs = list(PAGES.values()), {v: k for k, v in PAGES.items()}
     if ss.get("nav_side") not in labels:
@@ -1611,6 +1607,30 @@ def game_page() -> None:
                           lambda: load_prices(all_tickers()), INDICES["Nifty 50"])
 
 
+def markets_page() -> None:
+    """Gainers & losers, Stocks in focus and Dividends & splits, grouped on one page."""
+    view = st.pills("Markets view", ["Gainers & losers", "Stocks in focus", "Dividends & splits"],
+                    selection_mode="single", default="Gainers & losers", key="markets_view",
+                    label_visibility="collapsed") or "Gainers & losers"
+    if view == "Gainers & losers":
+        movers_section()
+    elif view == "Stocks in focus":
+        focus_section()
+    else:
+        corporate_tab()
+
+
+def learn_page() -> None:
+    """Financial terms and the quiz, grouped on one page."""
+    view = st.pills("Learn view", ["Financial terms", "Quiz"], selection_mode="single",
+                    default="Financial terms", key="learn_view",
+                    label_visibility="collapsed") or "Financial terms"
+    if view == "Financial terms":
+        terms_tab(load_news()[0])
+    else:
+        quiz_tab()
+
+
 def main() -> None:
     init_state()
     inject_css()
@@ -1621,19 +1641,13 @@ def main() -> None:
     if page == "news":
         filter_bar()
         news_section()
-    elif page == "movers":
-        movers_section()
-    elif page == "focus":
-        focus_section()
-    elif page == "actions":
-        corporate_tab()
-    elif page == "terms":
-        terms_tab(load_news()[0])
-    elif page == "quiz":
-        quiz_tab()
-    elif page == "game":
-        game_page()
+    elif page == "markets":
+        markets_page()
+    elif page == "learn":
+        learn_page()
     else:
+        game_page()
+    with st.expander("ℹ️ About Intellics"):
         about_tab()
     st.divider()
     st.caption(DISCLAIMER)
