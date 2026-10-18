@@ -702,9 +702,17 @@ def sector_heatmap(rows: list) -> None:
     labels, parents, values, colors, texts = [], [], [], [], []
     for sector, items in groups.items():
         avg = sum(p for _, p in items) / len(items)
-        labels.append(sector), parents.append(""), values.append(0), colors.append(avg), texts.append(f"{avg:+.2f}% avg")
+        labels.append(sector)
+        parents.append("")
+        values.append(0)
+        colors.append(avg)
+        texts.append(f"{avg:+.2f}% avg")
         for name, pct in items:
-            labels.append(name), parents.append(sector), values.append(1), colors.append(pct), texts.append(f"{pct:+.2f}%")
+            labels.append(name)
+            parents.append(sector)
+            values.append(1)
+            colors.append(pct)
+            texts.append(f"{pct:+.2f}%")
     limit = max(2.0, max(abs(c) for c in colors))
     fig = go.Figure(go.Treemap(
         labels=labels, parents=parents, values=values, branchvalues="remainder", text=texts,
