@@ -11,6 +11,11 @@ from config import INDICES, IST, PRICE_REFRESH, log
 
 
 # -------------------------------------------------------------- price data
+# yfinance threads=True starts one worker per ticker (about 145 now), which exceeds the thread limit on
+# Streamlit Cloud. A small fixed number keeps the download fast without exhausting threads.
+DOWNLOAD_THREADS = 4
+
+
 def _fast_info(ticker: str):
     fi = yf.Ticker(ticker).fast_info
     last, prev = float(fi["last_price"]), float(fi["previous_close"])
@@ -22,7 +27,7 @@ def load_prices(tickers: tuple[str, ...]) -> dict[str, tuple[float, float]]:
     out: dict = {}
     try:
         df = yf.download(list(tickers), period="7d", interval="1d", group_by="ticker",
-                         progress=False, auto_adjust=False, threads=True)
+                         progress=False, auto_adjust=False, threads=DOWNLOAD_THREADS)
         for t in tickers:
             try:
                 close = df[t]["Close"].dropna()
@@ -34,7 +39,7 @@ def load_prices(tickers: tuple[str, ...]) -> dict[str, tuple[float, float]]:
         log.warning("Batch price download failed: %s", exc)
     missing = [t for t in tickers if t not in out]
     if len(missing) > len(tickers) // 2:  # second route so the gainers/losers page is never empty
-        with ThreadPoolExecutor(max_workers=8) as pool:
+        with ThreadPoolExecutor(max_workers=4) as pool:
             for res in pool.map(lambda t: _safe(_fast_info, t), missing):
                 if res:
                     out[res[0]] = res[1]
