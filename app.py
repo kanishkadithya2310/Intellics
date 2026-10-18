@@ -525,20 +525,28 @@ def inject_css() -> None:
  background-image:linear-gradient(rgba(255,255,255,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.03) 1px,transparent 1px);
  background-size:42px 42px;animation:drift 40s linear infinite}}
 @keyframes drift{{to{{background-position:42px 42px}}}}
-.block-container{{padding-top:4.5rem;max-width:1100px;position:relative;z-index:1}}
+.block-container{{padding-top:3.2rem;max-width:1180px;position:relative;z-index:1}}
 div[class*="st-key-card_"]{{background:rgba(255,255,255,.05);backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,.1);
  border-radius:18px;padding:.4rem .6rem;transition:transform .2s,border-color .2s}}
 div[class*="st-key-card_"]:hover{{transform:translateY(-3px);border-color:rgba(120,160,255,.6)}}
 .hero-title{{font-size:2rem;font-weight:800;letter-spacing:.12em;line-height:1.15;margin:0}}
-.brand{{display:flex;align-items:center;gap:16px;margin-bottom:.3rem}}
+.brand{{position:relative;overflow:hidden;display:flex;align-items:center;gap:16px;margin:0 0 1.15rem;padding:1.15rem 1.3rem;background:linear-gradient(120deg,rgba(28,45,82,.82),rgba(45,26,76,.68));border:1px solid rgba(184,205,255,.18);border-radius:22px;box-shadow:0 18px 55px rgba(0,0,0,.22)}}
+.brand::after{{content:"";position:absolute;width:240px;height:240px;right:-90px;top:-150px;border-radius:50%;background:rgba(115,126,255,.18);filter:blur(4px);pointer-events:none}}
+.brand > *{{position:relative;z-index:1}}
+.hero-eyebrow{{display:inline-flex;align-items:center;gap:7px;font-size:.68rem;font-weight:700;letter-spacing:.13em;color:#c7d2fe;margin-bottom:.34rem}}
+.hero-eyebrow::before{{content:"";width:7px;height:7px;border-radius:50%;background:#5eead4;box-shadow:0 0 12px #5eead4}}
 .hero-sub{{opacity:.85;margin-bottom:.6rem}}
+.market-status{{display:flex;align-items:center;gap:8px;width:max-content;max-width:100%;padding:7px 11px;margin:0 0 .7rem;border:1px solid rgba(94,234,212,.2);border-radius:999px;background:rgba(15,118,110,.16);color:#ccfbf1;font-size:.8rem}}
+.market-status::before{{content:"";width:7px;height:7px;flex:none;border-radius:50%;background:#5eead4;box-shadow:0 0 10px #5eead4}}
 .mood{{height:12px;border-radius:99px;overflow:hidden;background:#ef4444;margin:.3rem 0 .2rem}}
 .mood>div{{height:100%;background:#22c55e;transition:width .6s}}
-button{{min-height:44px;border-radius:12px!important}}
+button{{min-height:44px;border-radius:12px!important;transition:transform .15s ease,box-shadow .15s ease!important}}
+button:hover{{transform:translateY(-1px);box-shadow:0 6px 18px rgba(0,0,0,.18)}}
+button:focus-visible,a:focus-visible,input:focus-visible{{outline:3px solid #67e8f9!important;outline-offset:2px!important}}
 .st-key-topnav div{{flex-wrap:wrap!important}}
 .st-key-topnav button{{min-height:46px;font-weight:600;padding:0 16px}}
-.stat-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:.4rem 0 .6rem}}
-.stat{{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:14px;padding:10px 12px;backdrop-filter:blur(8px)}}
+.stat-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:.25rem 0 .7rem}}
+.stat{{background:linear-gradient(145deg,rgba(255,255,255,.11),rgba(255,255,255,.045));border:1px solid rgba(255,255,255,.13);border-radius:16px;padding:12px 14px;backdrop-filter:blur(10px);box-shadow:0 8px 24px rgba(0,0,0,.12)}}
 .stat .l{{font-size:.74rem;opacity:.78;letter-spacing:.02em}}
 .stat .v{{font-size:1.3rem;font-weight:700;line-height:1.3}}
 .stat .d{{font-size:.8rem;font-weight:600}}
@@ -569,7 +577,7 @@ button{{min-height:44px;border-radius:12px!important}}
 @media (max-width:768px){{[data-testid="stSidebar"],[data-testid="stSidebarCollapsedControl"],[data-testid="collapsedControl"],[data-testid="stExpandSidebarButton"],[data-testid="stSidebarCollapseButton"],[data-testid="stSidebarHeader"]{{display:none!important}}}}
 @media (min-width:769px){{.st-key-topnav{{display:none!important}}}}
 @media (max-width:640px){{.hero-title{{font-size:1.25rem;letter-spacing:.06em}}.brand img{{height:56px!important;width:56px!important}}
-.block-container{{padding-left:.9rem;padding-right:.9rem}}.stat-grid{{grid-template-columns:repeat(2,1fr)}}.stat .v{{font-size:1.1rem}}
+.block-container{{padding-left:.9rem;padding-right:.9rem;padding-top:2rem}}.brand{{padding:.9rem;gap:12px;border-radius:18px}}.stat-grid{{grid-template-columns:repeat(2,1fr)}}.stat .v{{font-size:1.1rem}}
 .ftab{{grid-template-columns:1fr}}.gf{{grid-auto-flow:row;grid-template-rows:none;grid-template-columns:1fr}}
 .gf-title{{font-size:1.25rem}}.gf-price{{font-size:2rem}}}}
 @media (prefers-reduced-motion:reduce){{.stApp::before{{animation:none}}div[class*="st-key-card_"]{{transition:none}}}}
@@ -611,7 +619,8 @@ def logo_html() -> str:
 
 
 def header() -> None:
-    st.markdown(f'<div class="brand">{logo_html()}<div><div class="hero-title">{ORG_NAME}</div>'
+    st.markdown(f'<div class="brand">{logo_html()}<div><div class="hero-eyebrow">INDIAN MARKETS, EXPLAINED</div>'
+                f'<div class="hero-title">{ORG_NAME}</div>'
                 f'<div class="hero-sub" style="margin:.15rem 0 0">{ORG_SUBTITLE} · {TAGLINE}</div></div></div>',
                 unsafe_allow_html=True)
 
@@ -970,298 +979,6 @@ def info_table(items: list[tuple]) -> None:
     st.markdown(f'<div class="ftab">{cells}</div>', unsafe_allow_html=True)
 
 
-def range_bar(lo_label: str, hi_label: str, lo, hi, price) -> str:
-    """A low-to-high bar with a dot showing where the price is now."""
-    if not (lo and hi and hi > lo and price):
-        return ""
-    pos = min(max((price - lo) / (hi - lo), 0.0), 1.0) * 100
-    return (f'<div class="rb"><div class="ends"><span>{html.escape(lo_label)}<br><b>₹{lo:,.2f}</b></span>'
-            f'<span style="text-align:right">{html.escape(hi_label)}<br><b>₹{hi:,.2f}</b></span></div>'
-            f'<div class="track"><i class="dot" style="left:{pos:.1f}%"></i></div></div>')
-
-
-def analysis_card(price: float, f: dict, day: dict) -> None:
-    if not f and not day:
-        st.info("Company numbers aren't available right now. Please try again in a few minutes.")
-        st.button("🔄 Try again", on_click=retry_fundamentals, key="retry_fund_all")
-        return
-    bars = (range_bar("Today's low", "Today's high", day.get("dayLow"), day.get("dayHigh"), price)
-            + range_bar("52-week low", "52-week high", f.get("fiftyTwoWeekLow"), f.get("fiftyTwoWeekHigh"), price))
-    if bars:
-        st.markdown("**📈 Where is the price now?**")
-        st.markdown(bars, unsafe_allow_html=True)
-
-    de, roe, pm = f.get("debtToEquity"), f.get("returnOnEquity"), f.get("profitMargins")
-    de = de / 100 if de is not None else None      # Yahoo gives debt/equity as a percentage
-    roe = roe * 100 if roe is not None else None   # Yahoo gives ROE and margin as fractions (0.15 = 15%)
-    pm = pm * 100 if pm is not None else None
-    st.markdown("**📋 Fundamentals**")
-    if not any(f.get(k) is not None for k in RATIO_KEYS):
-        st.info("Yahoo Finance didn't send the company ratios (P/B, EPS, return on equity...) this time. "
-                "This happens often with free data on cloud apps. A dash (—) means 'not available', not zero.")
-        st.button("🔄 Try again", on_click=retry_fundamentals, key="retry_fund")
-    info_table([
-        ("P/B ratio", _num(f.get("priceToBook"), "x", 2),
-         "Share price compared with the company's book value (assets minus debts) per share."),
-        ("EPS (yearly)", _rs(f.get("trailingEps")), "Profit earned per share over the last year."),
-        ("Book value", _rs(f.get("bookValue")), "The company's net worth (assets minus debts) per share."),
-        ("Debt to equity", _num(de, "x", 2),
-         "How much the company has borrowed for every Rs 1 of its own money. Lower usually means less risk. Not meaningful for banks."),
-        ("Return on equity", _num(roe, "%"), "Profit earned on shareholders' money. Higher usually means the company uses money well."),
-        ("Profit margin", _num(pm, "%"), "The share of sales the company keeps as profit."),
-        ("Prev. close", _rs(day.get("prevClose")), "The price at which the share closed on the previous trading day."),
-        ("Volume", _volume(day.get("volume")), "How many shares have changed hands today."),
-    ])
-    with st.expander("How to read these numbers"):
-        st.markdown("- **P/E**: lower can mean cheaper, higher can mean investors expect growth. Compare within the same industry.\n"
-                    "- **Debt to equity**: above 1 means more borrowed money than own money (normal for banks and finance firms).\n"
-                    "- **Return on equity**: 15% or more is often seen as good.\n"
-                    "- **Range bars**: the closer the dot is to the right, the closer the price is to its high.")
-    st.caption("Numbers come from Yahoo Finance and can be missing or out of date. They are for learning, not advice to buy or sell.")
-
-
-def _breaks(df, interval: str, intraday: bool) -> list[dict]:
-    """Hide weekends, non-trading hours and market holidays so the chart has no empty gaps."""
-    if interval in ("1wk", "1mo"):
-        return []
-    breaks = [dict(bounds=["sat", "mon"])]
-    if intraday:
-        breaks.append(dict(bounds=[15.5, 9.25], pattern="hour"))
-    else:
-        have = set(df.index.date)
-        missing = [d.strftime("%Y-%m-%d") for d in pd.bdate_range(df.index[0].date(), df.index[-1].date()) if d.date() not in have]
-        if missing:
-            breaks.append(dict(values=missing))
-    return breaks
-
-
-def _rgba(hex_color: str, alpha: float) -> str:
-    h = hex_color.lstrip("#")
-    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
-    return f"rgba({r},{g},{b},{alpha})"
-
-
-def build_chart(df, kind: str, intraday: bool, interval: str, moves: list, heads: dict,
-                ref: float, ref_label: str, show_vol: bool, smas: set):
-    """Google Finance look: soft green/red area that fades downward, dotted reference line, values on the left."""
-    up = float(df["Close"].iloc[-1]) >= ref
-    color = "#81c995" if up else "#f28b82"
-    hi_s, lo_s = (df["High"], df["Low"]) if kind == "Candles" else (df["Close"], df["Close"])
-    lo, hi = float(lo_s.min()), float(hi_s.max())
-    pad = (max(hi, ref) - min(lo, ref)) * 0.12 or 1
-    y0, y1 = min(lo, ref) - pad, max(hi, ref) + pad
-    fig = make_subplots(rows=2 if show_vol else 1, cols=1, shared_xaxes=True, vertical_spacing=0.03,
-                        row_heights=[0.8, 0.2] if show_vol else [1.0])
-    if kind == "Candles":
-        fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
-                                     increasing_line_color="#22c55e", decreasing_line_color="#ef4444",
-                                     name="Price", showlegend=False), row=1, col=1)
-    else:
-        base = dict(x=df.index, y=df["Close"], mode="lines", name="Price", showlegend=False,
-                    line=dict(color=color, width=2), fill="tozeroy", fillcolor=_rgba(color, 0.14),
-                    hovertemplate="%{y:,.2f} INR<extra></extra>")
-        try:  # fade the colour from the line down to the bottom (needs a recent Plotly)
-            trace = go.Scatter(**base, fillgradient=dict(type="vertical", start=y0, stop=hi, colorscale=[
-                [0, _rgba(color, 0.0)], [1, _rgba(color, 0.40)]]))
-        except (ValueError, TypeError):
-            trace = go.Scatter(**base)
-        fig.add_trace(trace, row=1, col=1)
-    fig.add_hline(y=ref, line_dash="dot", line_color="rgba(203,213,225,.7)", line_width=1, row=1, col=1,
-                  annotation_text=f"{ref_label}<br>{ref:,.2f}" if ref_label else None,
-                  annotation_position="bottom right", annotation_font=dict(size=11, color="#cbd5e1"))
-    for n, col in ((20, "#f59e0b"), (50, "#60a5fa")):
-        if n in smas and len(df) > n:
-            fig.add_trace(go.Scatter(x=df.index, y=df["Close"].rolling(n).mean(), mode="lines", name=f"SMA {n}",
-                                     line=dict(color=col, width=1.4), hovertemplate=f"SMA {n}: %{{y:,.2f}}<extra></extra>"),
-                          row=1, col=1)
-    if moves:
-        text = []
-        for ts, _, pct in moves:
-            head = heads.get(ts)
-            line = f"{ts:%d %b}: {pct:+.1f}%"
-            if head:
-                line += "<br>" + textwrap.fill(head["title"], 42).replace("\n", "<br>")
-            text.append(line)
-        fig.add_trace(go.Scatter(x=[m[0] for m in moves], y=[m[1] for m in moves], mode="markers", showlegend=False, name="Big move",
-                                 marker=dict(size=12, symbol="diamond", line=dict(width=1.5, color="white"),
-                                             color=["#22c55e" if m[2] > 0 else "#ef4444" for m in moves]),
-                                 text=text, hovertemplate="%{text}<extra></extra>"), row=1, col=1)
-    if show_vol:
-        vcol = ["rgba(129,201,149,.55)" if c >= o else "rgba(242,139,130,.55)" for o, c in zip(df["Open"], df["Close"])]
-        fig.add_trace(go.Bar(x=df.index, y=df["Volume"], marker_color=vcol, name="Volume", showlegend=False,
-                             hovertemplate="Volume: %{y:,.0f}<extra></extra>"), row=2, col=1)
-        fig.update_yaxes(showgrid=False, tickformat=".2s", row=2, col=1)
-    span_days = (df.index[-1] - df.index[0]).days
-    tick = "%I:%M %p" if intraday and span_days < 2 else "%d %b" if span_days <= 200 else "%b %Y"
-    fig.update_xaxes(rangebreaks=_breaks(df, interval, intraday), rangeslider_visible=False, showgrid=False,
-                     showspikes=True, spikemode="across", spikesnap="cursor", spikethickness=1, spikedash="dot",
-                     spikecolor="#9aa0a6", tickformat=tick,
-                     hoverformat="%d %b, %I:%M %p" if intraday else "%d %b %Y")
-    fig.update_yaxes(range=[y0, y1], side="left", showgrid=True, gridcolor="rgba(255,255,255,.08)", zeroline=False,
-                     tickformat=",.0f" if y1 >= 200 else ",.2f", row=1, col=1)
-    fig.update_layout(height=430 if show_vol else 360, margin=dict(l=0, r=0, t=6, b=0), paper_bgcolor="rgba(0,0,0,0)",
-                      plot_bgcolor="rgba(0,0,0,0)", font_color="#e8eaed", dragmode=False, hovermode="x unified",
-                      hoverlabel=dict(bgcolor="#303134", font_color="#e8eaed"), showlegend=bool(smas),
-                      legend=dict(orientation="h", y=1.05, x=0))
-    return fig
-
-
-def company_explorer(rows: list, stories: list[dict]) -> None:
-    st.subheader("🔍 Explore a company")
-    pick = st.selectbox("Search or pick a company", sorted([r[0] for r in rows]), key="explore")
-    row = next(r for r in rows if r[0] == pick)
-    ticker, price, day_pct = row[1], row[2], row[3]
-    with st.spinner("Loading company numbers…"):
-        fund, day, last_div = load_fundamentals(ticker), load_day_stats(ticker), load_last_dividend(ticker)
-        point_time = last_point_time(ticker)
-
-    # Google Finance style header: name, NSE code, big price, change badge and today's rupee change
-    prev = price / (1 + day_pct / 100) if day_pct > -99 else price
-    cls, arrow = ("up", "↑") if day_pct >= 0 else ("dn", "↓")
-    when = f"Last data point: {_stamp(point_time)}" if point_time else "Time of last data point unavailable"
-    st.markdown(f'<div class="gf-head"><div class="gf-title">{html.escape(fund.get("longName") or pick)}</div>'
-                f'<div class="gf-sub">NSE: {html.escape(ticker.replace(".NS", ""))}'
-                + (f' · {html.escape(fund["sector"])}' if fund.get("sector") else "") + '</div>'
-                f'<div class="gf-row"><span><span class="gf-price">{price:,.2f}</span><span class="gf-cur">INR</span></span>'
-                f'<span class="gf-badge {cls}">{arrow} {abs(day_pct):.2f}%</span>'
-                f'<span class="gf-today {cls}">{price - prev:+,.2f} today</span></div>'
-                f'<div class="gf-time">{html.escape(when)} · {html.escape(market_label(point_time))} · source: Yahoo Finance</div></div>',
-                unsafe_allow_html=True)
-
-    rng = st.pills("Time range", list(RANGES), selection_mode="single", default="1D", key="range",
-                   label_visibility="collapsed") or "1D"
-    kind = st.session_state.get("ctype") or "Line"      # chart options sit below the chart, so read their saved values
-    ind = st.session_state.get("ind") or []
-    period, interval = RANGES[rng]
-    df = load_ohlc(ticker, period, interval)
-    if df is None:
-        st.info("Price history isn't available for this range right now. Try another range.")
-    else:
-        intraday = interval not in ("1d", "1wk", "1mo")
-        moves = [] if (intraday or interval == "1mo") else big_moves(df, weekly=interval == "1wk")
-        heads: dict = {}
-        if moves:
-            with st.spinner("Looking up why it moved…"):
-                heads = {m[0]: move_headline(pick, m[0].strftime("%Y-%m-%d")) for m in moves}
-        first, last = float(df["Close"].iloc[0]), float(df["Close"].iloc[-1])
-        ref, ref_label = (prev, "Previous close") if rng == "1D" else (first, "")
-        fig = build_chart(df, kind, intraday, interval, moves, heads, ref, ref_label, "Volume" in ind,
-                          {int(i.split()[1]) for i in ind if i.startswith("SMA")})
-        st.plotly_chart(fig, **PLOT_KW, config={"displayModeBar": False})
-        # for 1D we reuse the header's previous close, so both percentages always agree
-        r_chg = (price - prev) if rng == "1D" else last - first
-        r_pct = day_pct if rng == "1D" else (last / first - 1) * 100
-        c = "up" if r_chg >= 0 else "dn"
-        st.markdown(f'<div class="gf-note">{html.escape(rng)} change: <b class="{c}">{"▲" if r_chg >= 0 else "▼"} '
-                    f'{r_chg:+,.2f} ({r_pct:+.2f}%)</b> &nbsp;·&nbsp; High ₹{df["High"].max():,.2f} &nbsp;·&nbsp; '
-                    f'Low ₹{df["Low"].min():,.2f}</div>', unsafe_allow_html=True)
-    with st.expander("⚙️ Chart options"):
-        a, b = st.columns(2)
-        a.pills("Chart type", ["Line", "Candles"], selection_mode="single", default="Line", key="ctype")
-        b.pills("Indicators", ["Volume", "SMA 20", "SMA 50"], selection_mode="multi", default=[], key="ind")
-
-    # P/E: use Yahoo's number; if it is missing but yearly EPS is known, work it out as price / EPS
-    pe, eps = fund.get("trailingPE"), fund.get("trailingEps")
-    pe_label = "P/E ratio"
-    if pe is None and eps and eps > 0:
-        pe, pe_label = price / eps, "P/E (price ÷ EPS)"
-    dy = fund["dividendRate"] / price * 100 if fund.get("dividendRate") and price else None
-    gf_grid([("Open", _num(day.get("open"), "", 2)), ("High", _num(day.get("dayHigh"), "", 2)),
-             ("Low", _num(day.get("dayLow"), "", 2)),
-             ("Mkt cap", _crore(fund.get("marketCap"))), (pe_label, _num(pe, "", 2)),
-             ("52-wk high", _num(fund.get("fiftyTwoWeekHigh"), "", 2)),
-             ("Dividend yield", _num(dy, "%", 2)), ("Last dividend", _rs(last_div)),
-             ("52-wk low", _num(fund.get("fiftyTwoWeekLow"), "", 2))])
-
-    if df is not None and not intraday and moves:
-        st.markdown("**⚡ Biggest moves and what was in the news**")
-        for ts, _, pct in reversed(moves):
-            head = heads.get(ts)
-            label = f"{ts:%d %b %Y} · {'▲' if pct > 0 else '▼'} {pct:+.1f}%"
-            if head:
-                st.markdown(f"- **{label}**: [{md_safe(head['title'])}]({safe_url(head['link'])})  \n"
-                            f"  {small(head['publisher'])}", unsafe_allow_html=True)
-            else:
-                st.markdown(f"- **{label}**: no matching headline found from a trusted publisher")
-        st.caption("Diamonds on the chart mark these days. The headline is the top news result around that date, "
-                   "so it may not be the real cause. Please open the article to check.")
-    elif df is not None and not intraday and interval != "1mo":
-        st.caption("No unusually big single moves in this range.")
-
-    analysis_card(price, fund, day)
-
-    related = [s for s in stories if pick in s["tags"]][:3]
-    st.markdown("**Latest news on this company**" if related else "No recent headlines mention this company.")
-    for s in related:
-        meta = small(s["source"] + " · " + time_ago(s["ts"]))
-        st.markdown(f"- [{md_safe(s['title'])}]({safe_url(s['link'])})  \n  {meta}", unsafe_allow_html=True)
-
-
-# ------------------------------------------------ dividends, splits and bonus
-NSE_PAGE = "https://www.nseindia.com/companies-listing/corporate-filings-actions"
-NSE_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-               "Accept": "application/json,text/plain,*/*", "Accept-Language": "en-US,en;q=0.9", "Referer": NSE_PAGE}
-
-
-def _nse_date(text) -> date | None:
-    try:
-        return datetime.strptime(str(text).strip(), "%d-%b-%Y").date()
-    except Exception:
-        return None
-
-
-def _action_kind(subject: str) -> str | None:
-    low = subject.lower()
-    if "bonus" in low:
-        return "Bonus"
-    if "split" in low or "sub-division" in low or "sub division" in low:
-        return "Split"
-    if "dividend" in low:
-        return "Dividend"
-    return None
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def _fetch_nse_actions() -> list[dict]:
-    """Upcoming dividends, splits and bonus issues from the NSE (next 45 days). Raises on failure (so it is not cached)."""
-    today = datetime.now(IST).date()
-    url = ("https://www.nseindia.com/api/corporates-corporateActions?index=equities"
-           f"&from_date={today:%d-%m-%Y}&to_date={today + timedelta(days=45):%d-%m-%Y}")
-    session = requests.Session()
-    session.headers.update(NSE_HEADERS)
-    session.get("https://www.nseindia.com", timeout=6)  # NSE needs this first to hand out cookies
-    resp = session.get(url, timeout=10)
-    resp.raise_for_status()
-    out: list[dict] = []
-    for item in resp.json():
-        subject = clean_text(item.get("subject", ""))
-        kind, ex = _action_kind(subject), _nse_date(item.get("exDate"))
-        if kind and ex and ex >= today:
-            out.append({"company": item.get("comp") or item.get("symbol") or "?", "symbol": item.get("symbol", ""),
-                        "kind": kind, "detail": subject, "ex": ex, "record": _nse_date(item.get("recDate"))})
-    if not out:
-        raise ValueError("NSE returned no usable rows")
-    return sorted(out, key=lambda a: (a["ex"], a["company"]))
-
-
-def load_corporate_actions() -> list[dict]:
-    """NSE list, or [] if NSE is blocking us. After a failure we pause a few minutes instead of hammering NSE on every visit."""
-    fails = _store()["nse_fail"]
-    if time.time() - fails.get("t", 0) < 300:
-        return []
-    try:
-        return _fetch_nse_actions()
-    except Exception as exc:
-        fails["t"] = time.time()
-        log.warning("NSE corporate actions failed: %s", exc)
-        return []
-
-
-def retry_nse() -> None:
-    _fetch_nse_actions.clear()
-    _store()["nse_fail"].clear()
-
-
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_dividend_backup() -> list[dict]:
     """Backup route: next ex-dividend dates of the large companies tracked here (dividends only)."""
@@ -1531,6 +1248,7 @@ def price_status() -> str:
 @st.fragment(run_every=f"{PRICE_REFRESH}s")
 def price_bar() -> None:
     prices = load_prices(all_tickers())
+    st.markdown(f'<div class="market-status">{html.escape(market_label(load_data_time()))}</div>', unsafe_allow_html=True)
     metrics_row(prices)
     st.caption(price_status() + f" · updates every {PRICE_REFRESH} sec")
     mood_bar(mover_rows(prices))
@@ -1674,4 +1392,297 @@ def main() -> None:
         st.link_button("Found a problem? Tell us", FEEDBACK_URL)
 
 
+def range_bar(lo_label: str, hi_label: str, lo, hi, price) -> str:
+    """A low-to-high bar with a dot showing where the price is now."""
+    if not (lo and hi and hi > lo and price):
+        return ""
+    pos = min(max((price - lo) / (hi - lo), 0.0), 1.0) * 100
+    return (f'<div class="rb"><div class="ends"><span>{html.escape(lo_label)}<br><b>₹{lo:,.2f}</b></span>'
+            f'<span style="text-align:right">{html.escape(hi_label)}<br><b>₹{hi:,.2f}</b></span></div>'
+            f'<div class="track"><i class="dot" style="left:{pos:.1f}%"></i></div></div>')
+
+
+def analysis_card(price: float, f: dict, day: dict) -> None:
+    if not f and not day:
+        st.info("Company numbers aren't available right now. Please try again in a few minutes.")
+        st.button("🔄 Try again", on_click=retry_fundamentals, key="retry_fund_all")
+        return
+    bars = (range_bar("Today's low", "Today's high", day.get("dayLow"), day.get("dayHigh"), price)
+            + range_bar("52-week low", "52-week high", f.get("fiftyTwoWeekLow"), f.get("fiftyTwoWeekHigh"), price))
+    if bars:
+        st.markdown("**📈 Where is the price now?**")
+        st.markdown(bars, unsafe_allow_html=True)
+
+    de, roe, pm = f.get("debtToEquity"), f.get("returnOnEquity"), f.get("profitMargins")
+    de = de / 100 if de is not None else None      # Yahoo gives debt/equity as a percentage
+    roe = roe * 100 if roe is not None else None   # Yahoo gives ROE and margin as fractions (0.15 = 15%)
+    pm = pm * 100 if pm is not None else None
+    st.markdown("**📋 Fundamentals**")
+    if not any(f.get(k) is not None for k in RATIO_KEYS):
+        st.info("Yahoo Finance didn't send the company ratios (P/B, EPS, return on equity...) this time. "
+                "This happens often with free data on cloud apps. A dash (—) means 'not available', not zero.")
+        st.button("🔄 Try again", on_click=retry_fundamentals, key="retry_fund")
+    info_table([
+        ("P/B ratio", _num(f.get("priceToBook"), "x", 2),
+         "Share price compared with the company's book value (assets minus debts) per share."),
+        ("EPS (yearly)", _rs(f.get("trailingEps")), "Profit earned per share over the last year."),
+        ("Book value", _rs(f.get("bookValue")), "The company's net worth (assets minus debts) per share."),
+        ("Debt to equity", _num(de, "x", 2),
+         "How much the company has borrowed for every Rs 1 of its own money. Lower usually means less risk. Not meaningful for banks."),
+        ("Return on equity", _num(roe, "%"), "Profit earned on shareholders' money. Higher usually means the company uses money well."),
+        ("Profit margin", _num(pm, "%"), "The share of sales the company keeps as profit."),
+        ("Prev. close", _rs(day.get("prevClose")), "The price at which the share closed on the previous trading day."),
+        ("Volume", _volume(day.get("volume")), "How many shares have changed hands today."),
+    ])
+    with st.expander("How to read these numbers"):
+        st.markdown("- **P/E**: lower can mean cheaper, higher can mean investors expect growth. Compare within the same industry.\n"
+                    "- **Debt to equity**: above 1 means more borrowed money than own money (normal for banks and finance firms).\n"
+                    "- **Return on equity**: 15% or more is often seen as good.\n"
+                    "- **Range bars**: the closer the dot is to the right, the closer the price is to its high.")
+    st.caption("Numbers come from Yahoo Finance and can be missing or out of date. They are for learning, not advice to buy or sell.")
+
+
+def _breaks(df, interval: str, intraday: bool) -> list[dict]:
+    """Hide weekends, non-trading hours and market holidays so the chart has no empty gaps."""
+    if interval in ("1wk", "1mo"):
+        return []
+    breaks = [dict(bounds=["sat", "mon"])]
+    if intraday:
+        breaks.append(dict(bounds=[15.5, 9.25], pattern="hour"))
+    else:
+        have = set(df.index.date)
+        missing = [d.strftime("%Y-%m-%d") for d in pd.bdate_range(df.index[0].date(), df.index[-1].date()) if d.date() not in have]
+        if missing:
+            breaks.append(dict(values=missing))
+    return breaks
+
+
+def _rgba(hex_color: str, alpha: float) -> str:
+    h = hex_color.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+def build_chart(df, kind: str, intraday: bool, interval: str, moves: list, heads: dict,
+                ref: float, ref_label: str, show_vol: bool, smas: set):
+    """Google Finance look: soft green/red area that fades downward, dotted reference line, values on the left."""
+    up = float(df["Close"].iloc[-1]) >= ref
+    color = "#81c995" if up else "#f28b82"
+    hi_s, lo_s = (df["High"], df["Low"]) if kind == "Candles" else (df["Close"], df["Close"])
+    lo, hi = float(lo_s.min()), float(hi_s.max())
+    pad = (max(hi, ref) - min(lo, ref)) * 0.12 or 1
+    y0, y1 = min(lo, ref) - pad, max(hi, ref) + pad
+    fig = make_subplots(rows=2 if show_vol else 1, cols=1, shared_xaxes=True, vertical_spacing=0.03,
+                        row_heights=[0.8, 0.2] if show_vol else [1.0])
+    if kind == "Candles":
+        fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
+                                     increasing_line_color="#22c55e", decreasing_line_color="#ef4444",
+                                     name="Price", showlegend=False), row=1, col=1)
+    else:
+        base = dict(x=df.index, y=df["Close"], mode="lines", name="Price", showlegend=False,
+                    line=dict(color=color, width=2), fill="tozeroy", fillcolor=_rgba(color, 0.14),
+                    hovertemplate="%{y:,.2f} INR<extra></extra>")
+        try:  # fade the colour from the line down to the bottom (needs a recent Plotly)
+            trace = go.Scatter(**base, fillgradient=dict(type="vertical", start=y0, stop=hi, colorscale=[
+                [0, _rgba(color, 0.0)], [1, _rgba(color, 0.40)]]))
+        except (ValueError, TypeError):
+            trace = go.Scatter(**base)
+        fig.add_trace(trace, row=1, col=1)
+    fig.add_hline(y=ref, line_dash="dot", line_color="rgba(203,213,225,.7)", line_width=1, row=1, col=1,
+                  annotation_text=f"{ref_label}<br>{ref:,.2f}" if ref_label else None,
+                  annotation_position="bottom right", annotation_font=dict(size=11, color="#cbd5e1"))
+    for n, col in ((20, "#f59e0b"), (50, "#60a5fa")):
+        if n in smas and len(df) > n:
+            fig.add_trace(go.Scatter(x=df.index, y=df["Close"].rolling(n).mean(), mode="lines", name=f"SMA {n}",
+                                     line=dict(color=col, width=1.4), hovertemplate=f"SMA {n}: %{{y:,.2f}}<extra></extra>"),
+                          row=1, col=1)
+    if moves:
+        text = []
+        for ts, _, pct in moves:
+            head = heads.get(ts)
+            line = f"{ts:%d %b}: {pct:+.1f}%"
+            if head:
+                line += "<br>" + textwrap.fill(head["title"], 42).replace("\n", "<br>")
+            text.append(line)
+        fig.add_trace(go.Scatter(x=[m[0] for m in moves], y=[m[1] for m in moves], mode="markers", showlegend=False, name="Big move",
+                                 marker=dict(size=12, symbol="diamond", line=dict(width=1.5, color="white"),
+                                             color=["#22c55e" if m[2] > 0 else "#ef4444" for m in moves]),
+                                 text=text, hovertemplate="%{text}<extra></extra>"), row=1, col=1)
+    if show_vol:
+        vcol = ["rgba(129,201,149,.55)" if c >= o else "rgba(242,139,130,.55)" for o, c in zip(df["Open"], df["Close"])]
+        fig.add_trace(go.Bar(x=df.index, y=df["Volume"], marker_color=vcol, name="Volume", showlegend=False,
+                             hovertemplate="Volume: %{y:,.0f}<extra></extra>"), row=2, col=1)
+        fig.update_yaxes(showgrid=False, tickformat=".2s", row=2, col=1)
+    span_days = (df.index[-1] - df.index[0]).days
+    tick = "%I:%M %p" if intraday and span_days < 2 else "%d %b" if span_days <= 200 else "%b %Y"
+    fig.update_xaxes(rangebreaks=_breaks(df, interval, intraday), rangeslider_visible=False, showgrid=False,
+                     showspikes=True, spikemode="across", spikesnap="cursor", spikethickness=1, spikedash="dot",
+                     spikecolor="#9aa0a6", tickformat=tick,
+                     hoverformat="%d %b, %I:%M %p" if intraday else "%d %b %Y")
+    fig.update_yaxes(range=[y0, y1], side="left", showgrid=True, gridcolor="rgba(255,255,255,.08)", zeroline=False,
+                     tickformat=",.0f" if y1 >= 200 else ",.2f", row=1, col=1)
+    fig.update_layout(height=430 if show_vol else 360, margin=dict(l=0, r=0, t=6, b=0), paper_bgcolor="rgba(0,0,0,0)",
+                      plot_bgcolor="rgba(0,0,0,0)", font_color="#e8eaed", dragmode=False, hovermode="x unified",
+                      hoverlabel=dict(bgcolor="#303134", font_color="#e8eaed"), showlegend=bool(smas),
+                      legend=dict(orientation="h", y=1.05, x=0))
+    return fig
+
+
+def company_explorer(rows: list, stories: list[dict]) -> None:
+    st.subheader("🔍 Explore a company")
+    pick = st.selectbox("Search or pick a company", sorted([r[0] for r in rows]), key="explore")
+    row = next(r for r in rows if r[0] == pick)
+    ticker, price, day_pct = row[1], row[2], row[3]
+    with st.spinner("Loading company numbers…"):
+        fund, day, last_div = load_fundamentals(ticker), load_day_stats(ticker), load_last_dividend(ticker)
+        point_time = last_point_time(ticker)
+
+    # Google Finance style header: name, NSE code, big price, change badge and today's rupee change
+    prev = price / (1 + day_pct / 100) if day_pct > -99 else price
+    cls, arrow = ("up", "↑") if day_pct >= 0 else ("dn", "↓")
+    when = f"Last data point: {_stamp(point_time)}" if point_time else "Time of last data point unavailable"
+    st.markdown(f'<div class="gf-head"><div class="gf-title">{html.escape(fund.get("longName") or pick)}</div>'
+                f'<div class="gf-sub">NSE: {html.escape(ticker.replace(".NS", ""))}'
+                + (f' · {html.escape(fund["sector"])}' if fund.get("sector") else "") + '</div>'
+                f'<div class="gf-row"><span><span class="gf-price">{price:,.2f}</span><span class="gf-cur">INR</span></span>'
+                f'<span class="gf-badge {cls}">{arrow} {abs(day_pct):.2f}%</span>'
+                f'<span class="gf-today {cls}">{price - prev:+,.2f} today</span></div>'
+                f'<div class="gf-time">{html.escape(when)} · {html.escape(market_label(point_time))} · source: Yahoo Finance</div></div>',
+                unsafe_allow_html=True)
+
+    rng = st.pills("Time range", list(RANGES), selection_mode="single", default="1D", key="range",
+                   label_visibility="collapsed") or "1D"
+    kind = st.session_state.get("ctype") or "Line"      # chart options sit below the chart, so read their saved values
+    ind = st.session_state.get("ind") or []
+    period, interval = RANGES[rng]
+    df = load_ohlc(ticker, period, interval)
+    if df is None:
+        st.info("Price history isn't available for this range right now. Try another range.")
+    else:
+        intraday = interval not in ("1d", "1wk", "1mo")
+        moves = [] if (intraday or interval == "1mo") else big_moves(df, weekly=interval == "1wk")
+        heads: dict = {}
+        if moves:
+            with st.spinner("Looking up why it moved…"):
+                heads = {m[0]: move_headline(pick, m[0].strftime("%Y-%m-%d")) for m in moves}
+        first, last = float(df["Close"].iloc[0]), float(df["Close"].iloc[-1])
+        ref, ref_label = (prev, "Previous close") if rng == "1D" else (first, "")
+        fig = build_chart(df, kind, intraday, interval, moves, heads, ref, ref_label, "Volume" in ind,
+                          {int(i.split()[1]) for i in ind if i.startswith("SMA")})
+        st.plotly_chart(fig, **PLOT_KW, config={"displayModeBar": False})
+        # for 1D we reuse the header's previous close, so both percentages always agree
+        r_chg = (price - prev) if rng == "1D" else last - first
+        r_pct = day_pct if rng == "1D" else (last / first - 1) * 100
+        c = "up" if r_chg >= 0 else "dn"
+        st.markdown(f'<div class="gf-note">{html.escape(rng)} change: <b class="{c}">{"▲" if r_chg >= 0 else "▼"} '
+                    f'{r_chg:+,.2f} ({r_pct:+.2f}%)</b> &nbsp;·&nbsp; High ₹{df["High"].max():,.2f} &nbsp;·&nbsp; '
+                    f'Low ₹{df["Low"].min():,.2f}</div>', unsafe_allow_html=True)
+    with st.expander("⚙️ Chart options"):
+        a, b = st.columns(2)
+        a.pills("Chart type", ["Line", "Candles"], selection_mode="single", default="Line", key="ctype")
+        b.pills("Indicators", ["Volume", "SMA 20", "SMA 50"], selection_mode="multi", default=[], key="ind")
+
+    # P/E: use Yahoo's number; if it is missing but yearly EPS is known, work it out as price / EPS
+    pe, eps = fund.get("trailingPE"), fund.get("trailingEps")
+    pe_label = "P/E ratio"
+    if pe is None and eps and eps > 0:
+        pe, pe_label = price / eps, "P/E (price ÷ EPS)"
+    dy = fund["dividendRate"] / price * 100 if fund.get("dividendRate") and price else None
+    gf_grid([("Open", _num(day.get("open"), "", 2)), ("High", _num(day.get("dayHigh"), "", 2)),
+             ("Low", _num(day.get("dayLow"), "", 2)),
+             ("Mkt cap", _crore(fund.get("marketCap"))), (pe_label, _num(pe, "", 2)),
+             ("52-wk high", _num(fund.get("fiftyTwoWeekHigh"), "", 2)),
+             ("Dividend yield", _num(dy, "%", 2)), ("Last dividend", _rs(last_div)),
+             ("52-wk low", _num(fund.get("fiftyTwoWeekLow"), "", 2))])
+
+    if df is not None and not intraday and moves:
+        st.markdown("**⚡ Biggest moves and what was in the news**")
+        for ts, _, pct in reversed(moves):
+            head = heads.get(ts)
+            label = f"{ts:%d %b %Y} · {'▲' if pct > 0 else '▼'} {pct:+.1f}%"
+            if head:
+                st.markdown(f"- **{label}**: [{md_safe(head['title'])}]({safe_url(head['link'])})  \n"
+                            f"  {small(head['publisher'])}", unsafe_allow_html=True)
+            else:
+                st.markdown(f"- **{label}**: no matching headline found from a trusted publisher")
+        st.caption("Diamonds on the chart mark these days. The headline is the top news result around that date, "
+                   "so it may not be the real cause. Please open the article to check.")
+    elif df is not None and not intraday and interval != "1mo":
+        st.caption("No unusually big single moves in this range.")
+
+    analysis_card(price, fund, day)
+
+    related = [s for s in stories if pick in s["tags"]][:3]
+    st.markdown("**Latest news on this company**" if related else "No recent headlines mention this company.")
+    for s in related:
+        meta = small(s["source"] + " · " + time_ago(s["ts"]))
+        st.markdown(f"- [{md_safe(s['title'])}]({safe_url(s['link'])})  \n  {meta}", unsafe_allow_html=True)
+# ------------------------------------------------ dividends, splits and bonus
+NSE_PAGE = "https://www.nseindia.com/companies-listing/corporate-filings-actions"
+
+
+NSE_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+               "Accept": "application/json,text/plain,*/*", "Accept-Language": "en-US,en;q=0.9", "Referer": NSE_PAGE}
+
+
+def _nse_date(text) -> date | None:
+    try:
+        return datetime.strptime(str(text).strip(), "%d-%b-%Y").date()
+    except Exception:
+        return None
+
+
+def _action_kind(subject: str) -> str | None:
+    low = subject.lower()
+    if "bonus" in low:
+        return "Bonus"
+    if "split" in low or "sub-division" in low or "sub division" in low:
+        return "Split"
+    if "dividend" in low:
+        return "Dividend"
+    return None
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_nse_actions() -> list[dict]:
+    """Upcoming dividends, splits and bonus issues from the NSE (next 45 days). Raises on failure (so it is not cached)."""
+    today = datetime.now(IST).date()
+    url = ("https://www.nseindia.com/api/corporates-corporateActions?index=equities"
+           f"&from_date={today:%d-%m-%Y}&to_date={today + timedelta(days=45):%d-%m-%Y}")
+    session = requests.Session()
+    session.headers.update(NSE_HEADERS)
+    session.get("https://www.nseindia.com", timeout=6)  # NSE needs this first to hand out cookies
+    resp = session.get(url, timeout=10)
+    resp.raise_for_status()
+    out: list[dict] = []
+    for item in resp.json():
+        subject = clean_text(item.get("subject", ""))
+        kind, ex = _action_kind(subject), _nse_date(item.get("exDate"))
+        if kind and ex and ex >= today:
+            out.append({"company": item.get("comp") or item.get("symbol") or "?", "symbol": item.get("symbol", ""),
+                        "kind": kind, "detail": subject, "ex": ex, "record": _nse_date(item.get("recDate"))})
+    if not out:
+        raise ValueError("NSE returned no usable rows")
+    return sorted(out, key=lambda a: (a["ex"], a["company"]))
+
+
+def load_corporate_actions() -> list[dict]:
+    """NSE list, or [] if NSE is blocking us. After a failure we pause a few minutes instead of hammering NSE on every visit."""
+    fails = _store()["nse_fail"]
+    if time.time() - fails.get("t", 0) < 300:
+        return []
+    try:
+        return _fetch_nse_actions()
+    except Exception as exc:
+        fails["t"] = time.time()
+        log.warning("NSE corporate actions failed: %s", exc)
+        return []
+
+
 main()
+
+
+def retry_nse() -> None:
+    _fetch_nse_actions.clear()
+    _store()["nse_fail"].clear()
+
