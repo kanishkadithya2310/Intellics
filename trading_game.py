@@ -1,24 +1,34 @@
-"""Intellics Trading Challenge: a virtual stock-trading competition.
+"""Intellics Trading Challenge v1.7: a virtual stock-trading competition.
 
 Everyone starts with Rs 10,00,000 of PLAY money and trades the companies tracked by the app at the latest
 (possibly delayed) price. No real money is involved.
 
 Rankings
-- Overall: total portfolio value. Never resets.
-- This week: % return since the last "Close week" (or since the player joined). Because it is a % return,
-  somebody who joins late can still win the week.
+- This week: % return since the last closed week (or since the player joined). Because it is a % return,
+  somebody who joins late can still win the week. Top 3 get a title.
+- This month: % return since the end of last month's final closed week. Top 3 get a title.
+- Overall: total portfolio value. Never resets. Top 10 get a title.
 - Weekly winners: the winner of every closed week.
 
-Where the scores are kept
-- Nothing to set up: the game runs in PRACTICE MODE. Scores live in the app's memory and are lost whenever the
-  app restarts or goes to sleep. Fine for a demo.
-- Permanent scores: connect a free Supabase database (run supabase_setup.sql, then add the secrets
-  SUPABASE_URL, SUPABASE_KEY and ADMIN_PIN). The game switches to it automatically.
+v1.7
+- The week closes BY ITSELF on Saturday (00:00 IST). app.py calls auto_close_if_due() on every visit; it does
+  nothing on weekdays and never raises.
+- The organiser panel is hidden from players. It only appears when the app is opened with the secret link
+  (https://YOUR-APP.streamlit.app/?page=game&organiser=YOUR_ORGANISER_KEY) and it still needs the admin password to
+  close a week.
+- Database check button (organiser panel): tests the URL, the key, both tables and a real write.
+- Works with the new Supabase keys (sb_secret_...) as well as the old service_role key.
 
-This file must sit next to app.py. app.py calls trading_game.game_tab(...).
+Where the scores are kept
+- Nothing to set up: PRACTICE MODE. Scores live in the app's memory and are lost whenever the app restarts.
+- Permanent scores: run supabase_setup.sql in Supabase, then add the secrets SUPABASE_URL, SUPABASE_KEY (the SECRET key),
+  ADMIN_PIN and ORGANISER_KEY. The game switches to the database automatically.
+
+This file must sit next to app.py. app.py calls trading_game.game_tab(...) and trading_game.auto_close_if_due(...).
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import html
@@ -55,6 +65,9 @@ MIN_PRICE_COVERAGE = 0.7      # at least this share of companies must have a pri
 ADMIN_MAX_TRIES = 5           # wrong admin passwords allowed before the organiser panel pauses
 ADMIN_LOCK_MINUTES = 15
 WEEKS_SHOWN = 12              # closed weeks kept on screen
+AUTO_CHECK_SECONDS = 300      # how often a weekend visit may re-check whether the week still needs closing
+AUTO_GRACE_HOURS = 12         # a week closed by hand up to this long before Saturday 00:00 counts as "already closed"
+WEEK_TOP, MONTH_TOP, OVERALL_TOP = 3, 3, 10   # how many players earn a title
 IST = ZoneInfo("Asia/Kolkata")
 PLOT_KW = {} if hasattr(st, "iframe") else {"use_container_width": True}  # new vs old Streamlit (same trick as app.py)
 
@@ -62,10 +75,17 @@ NICK_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.-]{2,19}$")
 PIN_RE = re.compile(r"^\d{6,8}$")
 NAME_RE = re.compile(r"^[A-Za-z][A-Za-z .'\-]{1,39}$")
 PUBLIC_COLUMNS = "nick_key,display,real_name,cash,holdings,start_nifty,created_at"
+WEEK_TITLES = ["🥇 Week champion", "🥈 Week runner-up", "🥉 Week third"]
+MONTH_TITLES = ["🥇 Month champion", "🥈 Month runner-up", "🥉 Month third"]
 
 
 class GameDBError(Exception):
-    """Something went wrong talking to the score database. The message is safe to show to players."""
+    """Something went wrong talking to the score database. The message is safe to show to players;
+    `detail` (technical) is shown only in the organiser's database check."""
+
+    def __init__(self, message: str, detail: str = ""):
+        super().__init__(message)
+        self.detail = detail
 
 
 # ----------------------------------------------------------------- formatting
@@ -120,8 +140,10 @@ def _iso(dt: datetime) -> str:
 
 
 def _parse_ts(text) -> datetime | None:
+    s = str(text).replace("Z", "+00:00")
+    s = re.sub(r"\.(\d+)", lambda m: "." + m.group(1).ljust(6, "0")[:6], s)  # older Pythons need exactly 6 decimals
     try:
-        dt = datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(s)
     except (TypeError, ValueError):
         return None
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
@@ -130,20 +152,48 @@ def _parse_ts(text) -> datetime | None:
 # ---------------------------------------------------------------- storage
 @st.cache_resource
 def _memory_db() -> dict:
-    return {"players": {}, "weeks": [], "lock": threading.Lock(), "admin": {"fails": 0, "until": 0.0}}
+    return {"players": {}, "weeks": [], "lock": threading.Lock(), "admin": {"fails": 0, "until": 0.0},
+            "auto": {"t": 0.0}}
+
+
+def _secret(name: str) -> str:
+    """A secret as clean text (stray spaces and quote marks removed), or '' when it is not set."""
+    try:
+        value = str(st.secrets.get(name, "") or "")
+    except Exception:
+        return ""
+    return value.strip().strip("\"'").strip()
 
 
 def _sb_config() -> tuple[str, str] | None:
-    try:
-        url = str(st.secrets.get("SUPABASE_URL", "") or "").rstrip("/")
-        key = str(st.secrets.get("SUPABASE_KEY", "") or "")
-    except Exception:
-        return None
+    url, key = _secret("SUPABASE_URL").rstrip("/"), _secret("SUPABASE_KEY")
+    if url.endswith("/rest/v1"):
+        url = url[: -len("/rest/v1")]
     return (url, key) if url.startswith("https://") and key else None
+
+
+def _sb_secrets_present() -> bool:
+    return bool(_secret("SUPABASE_URL") or _secret("SUPABASE_KEY"))
 
 
 def db_mode() -> str:
     return "supabase" if _sb_config() else "practice"
+
+
+def _key_problem(key: str) -> str:
+    """Spots the PUBLIC key by mistake. The game needs the SECRET key, because the tables are locked to the public one."""
+    if key.startswith("sb_publishable_"):
+        return ("SUPABASE_KEY is the PUBLISHABLE (public) key. Use the SECRET key (starts with sb_secret_) "
+                "or the legacy service_role key.")
+    if key.count(".") == 2:  # an old-style key is a JWT: peek at its 'role'
+        try:
+            payload = key.split(".")[1]
+            role = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))).get("role")
+            if role == "anon":
+                return "SUPABASE_KEY is the anon (public) key. Use the service_role key or a secret key (sb_secret_...)."
+        except Exception:
+            pass
+    return ""
 
 
 def _sb(table: str, method: str, params: dict | None = None, body: dict | None = None) -> list:
@@ -151,20 +201,30 @@ def _sb(table: str, method: str, params: dict | None = None, body: dict | None =
     if not cfg:
         raise GameDBError("The score database is not set up.")
     url, key = cfg
-    headers = {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json",
-               "Prefer": "return=representation"}
+    headers = {"apikey": key, "Content-Type": "application/json", "Prefer": "return=representation"}
+    if not key.startswith("sb_"):  # the new sb_ keys are not JWTs and must only go in the apikey header
+        headers["Authorization"] = f"Bearer {key}"
     try:
         resp = requests.request(method, f"{url}/rest/v1/{table}", headers=headers, params=params or {}, json=body, timeout=10)
     except requests.RequestException as exc:
         log.warning("Supabase unreachable: %s", exc)
-        raise GameDBError("Could not reach the score database. Please try again in a moment.") from exc
+        raise GameDBError("Could not reach the score database. Please try again in a moment.",
+                          f"{type(exc).__name__}: check SUPABASE_URL and that the project is not paused") from exc
     if resp.status_code == 409:
         raise GameDBError("That nickname is already taken. Pick another." if table == "players"
                           else "That week has already been closed.")
     if resp.status_code >= 400:
-        log.warning("Supabase error %s on %s: %s", resp.status_code, table, resp.text[:200])  # never log the key
-        raise GameDBError("The score database refused the request. The site owner should check the Supabase URL, "
-                          "key and tables (run supabase_setup.sql again).")
+        detail = f"HTTP {resp.status_code}: {resp.text[:200]}"
+        log.warning("Supabase error on %s: %s", table, detail)  # never log the key
+        if resp.status_code in (401, 403):
+            hint = "The database rejected the key. The site owner should use the SECRET (service_role) key, not the public one."
+        elif resp.status_code == 404 or "PGRST205" in resp.text or "42P01" in resp.text:
+            hint = "The game tables were not found. The site owner should run supabase_setup.sql in Supabase."
+        elif "42703" in resp.text or "PGRST204" in resp.text:
+            hint = "A table column is missing. The site owner should run supabase_setup.sql again."
+        else:
+            hint = "The score database refused the request. The site owner should check the Supabase URL, key and tables."
+        raise GameDBError(hint, detail)
     try:
         return resp.json() if resp.text else []
     except ValueError:
@@ -271,6 +331,42 @@ def _clear_caches() -> None:
     _cached_weeks.clear()
 
 
+def db_check() -> list[tuple[bool, str]]:
+    """Organiser tool: walks through everything the game needs and says what is wrong, in plain words."""
+    cfg = _sb_config()
+    if not cfg:
+        why = ("SUPABASE_URL or SUPABASE_KEY is missing in the app's Secrets."
+               if not _sb_secrets_present() else
+               "SUPABASE_URL or SUPABASE_KEY is set but looks wrong (the URL must start with https:// and the key must not be empty).")
+        return [(False, why + " The game is running in practice mode.")]
+    url, key = cfg
+    kind = "secret key" if key.startswith("sb_secret_") else "legacy JWT key" if key.count(".") == 2 else "key"
+    out: list[tuple[bool, str]] = [(True, f"Found SUPABASE_URL ({url}) and a {kind}.")]
+    problem = _key_problem(key)
+    if problem:
+        out.append((False, problem))
+    for table in ("players", "game_weeks"):
+        try:
+            rows = _sb(table, "GET", {"season": f"eq.{SEASON}", "select": "*", "limit": "1000"})
+            out.append((True, f"Table '{table}' is reachable ({len(rows)} row(s) in {SEASON})."))
+        except GameDBError as exc:
+            out.append((False, f"Table '{table}': {exc} [{exc.detail}]"))
+    test_filter = {"season": f"eq.{SEASON}", "nick_key": "eq.__dbcheck__"}
+    try:  # a real write: add one temporary row, then remove it (this is what a publishable key cannot do)
+        _sb("players", "DELETE", test_filter)
+        _sb("players", "POST", body={"season": SEASON, "nick_key": "__dbcheck__", "display": "dbcheck",
+                                      "salt": "00", "pin_hash": "x"})
+        _sb("players", "DELETE", test_filter)
+        out.append((True, "Write test passed (one temporary test row was added and removed)."))
+    except GameDBError as exc:
+        out.append((False, f"Write test failed: {exc} [{exc.detail}]"))
+        try:
+            _sb("players", "DELETE", test_filter)
+        except GameDBError:
+            pass
+    return out
+
+
 # ----------------------------------------------------------- accounts (nickname + PIN)
 def _hash_pin(pin: str, salt_hex: str) -> str:
     return hashlib.pbkdf2_hmac("sha256", pin.encode(), bytes.fromhex(salt_hex), 150_000).hex()
@@ -317,7 +413,7 @@ def register(nickname: str, pin: str, nifty_price: float | None, real_name: str 
 
 
 def _lock_remaining(player: dict) -> float:
-    until = _parse_ts(player.get("lock_until"))
+    until = _parse_ts(player.get("lock_until")) if player.get("lock_until") else None
     return max(0.0, (until - _now()).total_seconds()) if until else 0.0
 
 
@@ -422,9 +518,30 @@ def week_bases(weeks: list[dict]) -> dict[str, float]:
     return {r["key"]: float(r["end"]) for r in (weeks[0].get("results") or []) if r.get("key")}
 
 
+def _month_start(now_ist: datetime | None = None) -> datetime:
+    now_ist = now_ist or datetime.now(IST)
+    return now_ist.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def month_bases(weeks: list[dict], now_ist: datetime | None = None) -> dict[str, float]:
+    """Each player's value at the end of last month: the newest week closed BEFORE this month started.
+    Players who are not in it (or if no week was closed before this month) start from START_CASH."""
+    start = _month_start(now_ist)
+    for w in weeks:  # newest first
+        closed = _parse_ts(w.get("closed_at"))
+        if closed and closed.astimezone(IST) < start:
+            return {r["key"]: float(r["end"]) for r in (w.get("results") or []) if r.get("key")}
+    return {}
+
+
+def is_active(player: dict) -> bool:
+    """Has this player done anything? Only active players can earn titles (so an empty account never 'wins')."""
+    return bool(player["holdings"]) or abs(player["cash"] - START_CASH) > 0.005
+
+
 def build_board(players: list[dict], price_of: dict[str, float], nifty_now: float | None,
-                base_of: dict[str, float] | None = None) -> list[dict]:
-    base_of = base_of or {}
+                base_of: dict[str, float] | None = None, month_base_of: dict[str, float] | None = None) -> list[dict]:
+    base_of, month_base_of = base_of or {}, month_base_of or {}
     rows = []
     for p in players:
         total, _, no_price = portfolio_value(p, price_of)
@@ -433,10 +550,28 @@ def build_board(players: list[dict], price_of: dict[str, float], nifty_now: floa
         if nifty_now and p.get("start_nifty"):
             beat = ret - (nifty_now / p["start_nifty"] - 1) * 100
         base = base_of.get(p["nick_key"], START_CASH)
+        mbase = month_base_of.get(p["nick_key"], START_CASH)
         rows.append({"key": p["nick_key"], "name": p["display"], "real": p.get("real_name") or "", "total": total,
                      "ret": ret, "beat": beat, "positions": len(p["holdings"]), "no_price": no_price,
-                     "base": base, "week_ret": (total / base - 1) * 100 if base > 0 else 0.0})
+                     "base": base, "week_ret": (total / base - 1) * 100 if base > 0 else 0.0,
+                     "month_ret": (total / mbase - 1) * 100 if mbase > 0 else 0.0, "active": is_active(p)})
     return rows
+
+
+def award_titles(board: list[dict]) -> dict[str, dict[str, str]]:
+    """{'week': {player key: title}, 'month': {...}, 'overall': {...}}. Only active players can earn one."""
+    act = [r for r in board if r["active"]]
+    week = sorted(act, key=lambda r: (r["week_ret"], r["total"]), reverse=True)[:WEEK_TOP]
+    month = sorted(act, key=lambda r: (r["month_ret"], r["total"]), reverse=True)[:MONTH_TOP]
+    overall = sorted(act, key=lambda r: r["total"], reverse=True)[:OVERALL_TOP]
+    overall_label = lambda i: "👑 Overall champion" if i == 0 else "💎 Overall top 3" if i < 3 else "⭐ Overall top 10"
+    return {"week": {r["key"]: WEEK_TITLES[i] for i, r in enumerate(week)},
+            "month": {r["key"]: MONTH_TITLES[i] for i, r in enumerate(month)},
+            "overall": {r["key"]: overall_label(i) for i, r in enumerate(overall)}}
+
+
+def titles_of(titles: dict[str, dict[str, str]], key: str) -> list[str]:
+    return [titles[c][key] for c in ("overall", "month", "week") if key in titles[c]]
 
 
 def compute_week(players: list[dict], price_of: dict[str, float], base_of: dict[str, float]) -> list[dict]:
@@ -450,7 +585,8 @@ def compute_week(players: list[dict], price_of: dict[str, float], base_of: dict[
 
 
 def close_week(prices: dict, tracked_tickers: list[str]) -> tuple[bool, str]:
-    """Organiser action. Saves the winner and everyone's closing value (the next week's starting point)."""
+    """Saves the winner and everyone's closing value (the next week's starting point).
+    Used by the organiser button AND by the automatic Saturday close."""
     price_of = {t: v[0] for t, v in prices.items() if v and v[0]}
     tracked = list(tracked_tickers)
     if not tracked or sum(1 for t in tracked if t in price_of) < MIN_PRICE_COVERAGE * len(tracked):
@@ -479,6 +615,38 @@ def close_week(prices: dict, tracked_tickers: list[str]) -> tuple[bool, str]:
         return False, str(exc)
     _clear_caches()
     return True, f"Week {week_no} closed. Winner: {_who_plain(win['name'], win['real'])} with {_pct(win['ret'])}."
+
+
+def _saturday_start(now_ist: datetime) -> datetime:
+    """00:00 IST of the Saturday that began the current weekend (call it only on a Saturday or Sunday)."""
+    return (now_ist - timedelta(days=(now_ist.weekday() - 5) % 7)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def auto_close_if_due(get_prices: Callable[[], dict], tracked_tickers: list[str] | None = None) -> None:
+    """Closes the week by itself once Saturday 00:00 IST has passed. app.py calls this on every visit.
+    - Weekdays: returns at once (no database call, no price download).
+    - Weekends: checks at most every few minutes; closes only if this weekend's close has not happened yet.
+    - Never raises. If prices or the database are unavailable it simply tries again a few minutes later.
+    Two visitors at the same moment cannot close the week twice (the database refuses a duplicate week)."""
+    try:
+        now = datetime.now(IST)
+        if now.weekday() < 5:
+            return
+        auto = _memory_db()["auto"]
+        if time.time() - auto["t"] < AUTO_CHECK_SECONDS:
+            return
+        auto["t"] = time.time()
+        last = db_weeks(1)
+        if last:
+            closed = _parse_ts(last[0].get("closed_at"))
+            if closed and closed >= _saturday_start(now) - timedelta(hours=AUTO_GRACE_HOURS):
+                return  # already closed for this weekend
+        if not db_list():
+            return
+        ok, message = close_week(get_prices() or {}, list(tracked_tickers or []))
+        log.info("Auto-close: %s", message)
+    except Exception as exc:  # never let the game take the whole app down
+        log.warning("Auto-close skipped: %s", exc)
 
 
 # ----------------------------------------------------------------- display helpers
@@ -527,8 +695,12 @@ def _day(ts_text) -> str:
 # ------------------------------------------------------------------ pieces of the page
 def _mode_banner() -> None:
     if db_mode() == "practice":
-        st.info("**Practice mode.** Scores are kept only while the app is running and are cleared when it restarts or sleeps. "
-                "The site owner can make them permanent by connecting a free Supabase database.")
+        if _sb_secrets_present():
+            st.warning("The database secrets are set but look wrong (the URL must start with https:// and the key must not be empty), "
+                       "so the game is running in practice mode and scores will NOT be saved.")
+        else:
+            st.info("**Practice mode.** Scores are kept only while the app is running and are cleared when it restarts or sleeps. "
+                    "The site owner can make them permanent by connecting a free Supabase database.")
 
 
 def _auth_panel(nifty_price: float | None) -> None:
@@ -623,27 +795,26 @@ def _trade_panel(player: dict, companies: dict[str, str], prices: dict, price_of
 
 def _name_panel(player: dict) -> None:
     """Lets a player add, change or remove the real name shown next to their nickname."""
-    if True:
-        st.caption("Your nickname is always shown. If you add your real name, it is shown publicly next to it. "
-                   "Empty the box and save to show only your nickname.")
-        with st.form("g_name_form"):
-            new = st.text_input("Real name", value=player.get("real_name") or "", key="g_real_edit", max_chars=40)
-            save = st.form_submit_button("Save name")
-        if save:
-            name, err = clean_real_name(new)
-            if err:
-                st.error(err)
-                return
-            try:
-                db_patch(player["nick_key"], {"real_name": name or None})
-            except GameDBError as exc:
-                st.error(str(exc))
-                return
-            player["real_name"] = name
-            st.session_state["g_player"] = player
-            _clear_caches()
-            st.session_state["g_flash"] = "Name saved." if name else "Name removed. Only your nickname is shown."
-            st.rerun()
+    st.caption("Your nickname is always shown. If you add your real name, it is shown publicly next to it. "
+               "Empty the box and save to show only your nickname.")
+    with st.form("g_name_form"):
+        new = st.text_input("Real name", value=player.get("real_name") or "", key="g_real_edit", max_chars=40)
+        save = st.form_submit_button("Save name")
+    if save:
+        name, err = clean_real_name(new)
+        if err:
+            st.error(err)
+            return
+        try:
+            db_patch(player["nick_key"], {"real_name": name or None})
+        except GameDBError as exc:
+            st.error(str(exc))
+            return
+        player["real_name"] = name
+        st.session_state["g_player"] = player
+        _clear_caches()
+        st.session_state["g_flash"] = "Name saved." if name else "Name removed. Only your nickname is shown."
+        st.rerun()
 
 
 def _portfolio_panel(player: dict, price_of: dict) -> None:
@@ -684,7 +855,16 @@ def _portfolio_panel(player: dict, price_of: dict) -> None:
                     for t in trades])
 
 
-def _week_tab(board: list[dict], weeks: list[dict], me: str | None) -> None:
+def _next_close_text(now_ist: datetime | None = None) -> str:
+    now_ist = now_ist or datetime.now(IST)
+    days = (5 - now_ist.weekday()) % 7
+    nxt = (now_ist + timedelta(days=days)).replace(hour=0, minute=0, second=0, microsecond=0)
+    if nxt <= now_ist:
+        nxt += timedelta(days=7)
+    return f"{nxt:%A, %d %b} at 12:00 am IST"
+
+
+def _week_tab(board: list[dict], weeks: list[dict], me: str | None, titles: dict) -> None:
     week_no = (int(weeks[0]["week_no"]) if weeks else 0) + 1
     since = f"since {_day(weeks[0].get('closed_at'))}" if weeks else "since each player joined"
     st.markdown(f"**Week {week_no}** · % return {since}")
@@ -695,15 +875,36 @@ def _week_tab(board: list[dict], weeks: list[dict], me: str | None) -> None:
         if r["key"] == me:
             me_row = i
         rows.append([medals.get(i, str(i + 1)), _who(r["name"], r["real"]),
-                     f'<span class="{_cls(r["week_ret"])}">{_pct(r["week_ret"])}</span>', _inr(r["total"]), str(r["positions"])])
-    _table([("#", False), ("Trader", False), ("This week", True), ("Portfolio value", True), ("Stocks", True)], rows, me_row)
+                     f'<span class="{_cls(r["week_ret"])}">{_pct(r["week_ret"])}</span>', _inr(r["total"]),
+                     _esc(titles["week"].get(r["key"], ""))])
+    _table([("#", False), ("Trader", False), ("This week", True), ("Portfolio value", True), ("Title", False)], rows, me_row)
     mine = next((i for i, r in enumerate(ranked) if r["key"] == me), None) if me else None
     if mine is not None and me_row is None:
         st.caption(f"Your rank this week: #{mine + 1} of {len(ranked)} ({_pct(ranked[mine]['week_ret'])})")
-    st.caption("Ranked by % return, so joining late does not hurt you. A week ends when the organiser closes it.")
+    st.caption(f"Ranked by % return, so joining late does not hurt you. The week closes by itself on {_next_close_text()}. "
+               f"Top {WEEK_TOP} earn a title (players who have not traded yet cannot).")
 
 
-def _overall_tab(board: list[dict], me: str | None) -> None:
+def _month_tab(board: list[dict], me: str | None, titles: dict) -> None:
+    st.markdown(f"**{datetime.now(IST):%B %Y}** · % return since the end of last month")
+    ranked = sorted(board, key=lambda r: (r["month_ret"], r["total"]), reverse=True)
+    medals = {0: "🥇", 1: "🥈", 2: "🥉"}
+    rows, me_row = [], None
+    for i, r in enumerate(ranked[:BOARD_SIZE]):
+        if r["key"] == me:
+            me_row = i
+        rows.append([medals.get(i, str(i + 1)), _who(r["name"], r["real"]),
+                     f'<span class="{_cls(r["month_ret"])}">{_pct(r["month_ret"])}</span>', _inr(r["total"]),
+                     _esc(titles["month"].get(r["key"], ""))])
+    _table([("#", False), ("Trader", False), ("This month", True), ("Portfolio value", True), ("Title", False)], rows, me_row)
+    mine = next((i for i, r in enumerate(ranked) if r["key"] == me), None) if me else None
+    if mine is not None and me_row is None:
+        st.caption(f"Your rank this month: #{mine + 1} of {len(ranked)} ({_pct(ranked[mine]['month_ret'])})")
+    st.caption(f"The month starts from each player's value when the last week of the previous month was closed "
+               f"(or from the day they joined). Top {MONTH_TOP} earn a title.")
+
+
+def _overall_tab(board: list[dict], me: str | None, titles: dict) -> None:
     ranked = sorted(board, key=lambda r: r["total"], reverse=True)
     medals = {0: "🥇", 1: "🥈", 2: "🥉"}
     rows, me_row = [], None
@@ -712,13 +913,15 @@ def _overall_tab(board: list[dict], me: str | None) -> None:
             me_row = i
         beat = "-" if r["beat"] is None else f'<span class="{_cls(r["beat"])}">{_pct(r["beat"])}</span>'
         rows.append([medals.get(i, str(i + 1)), _who(r["name"], r["real"]), _inr(r["total"]),
-                     f'<span class="{_cls(r["ret"])}">{_pct(r["ret"])}</span>', beat, str(r["positions"])])
-    _table([("#", False), ("Trader", False), ("Portfolio value", True), ("Return", True), ("vs Nifty 50", True), ("Stocks", True)],
+                     f'<span class="{_cls(r["ret"])}">{_pct(r["ret"])}</span>', beat,
+                     _esc(titles["overall"].get(r["key"], ""))])
+    _table([("#", False), ("Trader", False), ("Portfolio value", True), ("Return", True), ("vs Nifty 50", True), ("Title", False)],
            rows, me_row)
     mine = next((i for i, r in enumerate(ranked) if r["key"] == me), None) if me else None
     if mine is not None and me_row is None:
         st.caption(f"Your overall rank: #{mine + 1} of {len(ranked)} ({_inr(ranked[mine]['total'])})")
-    st.caption("Ranked by total portfolio value. Never resets. 'vs Nifty 50' compares your return with the Nifty since you joined.")
+    st.caption(f"Ranked by total portfolio value. Never resets. Top {OVERALL_TOP} earn a title. "
+               "'vs Nifty 50' compares your return with the Nifty since you joined.")
 
 
 def _winners_tab(weeks: list[dict]) -> None:
@@ -756,39 +959,60 @@ def leaderboard_section(get_prices: Callable[[], dict], nifty_ticker: str, me: s
     if not players:
         st.info("No traders yet. Be the first to join!")
         return
-    board = build_board(players, price_of, price_of.get(nifty_ticker), week_bases(weeks))
-    week_tab, overall_tab, winners_tab = st.tabs(["This week", "Overall", "Weekly winners"])
+    board = build_board(players, price_of, price_of.get(nifty_ticker), week_bases(weeks), month_bases(weeks))
+    titles = award_titles(board)
+    week_tab, month_tab, overall_tab, winners_tab = st.tabs(["This week", "This month", "Overall", "Weekly winners"])
     with week_tab:
-        _week_tab(board, weeks, me)
+        _week_tab(board, weeks, me, titles)
+    with month_tab:
+        _month_tab(board, me, titles)
     with overall_tab:
-        _overall_tab(board, me)
+        _overall_tab(board, me, titles)
     with winners_tab:
         _winners_tab(weeks)
     st.caption(f"{len(board)} trader(s) this season · refreshes about every {BOARD_REFRESH} sec")
 
 
-def _admin_secret() -> str:
+# ------------------------------------------------------------------ organiser (hidden)
+def _organiser_link() -> bool:
+    """True only when the page was opened with ?organiser=<ORGANISER_KEY>. Players never see the panel."""
+    key = _secret("ORGANISER_KEY")
+    if not key:
+        return False
     try:
-        return str(st.secrets.get("ADMIN_PIN", "") or "")
+        given = str(st.query_params.get("organiser") or "")
     except Exception:
-        return ""
+        return False
+    return bool(given) and hmac.compare_digest(given.encode(), key.encode())
 
 
 def _organiser_panel(get_prices: Callable[[], dict], companies: dict[str, str]) -> None:
-    with st.expander("🔐 Organisers only"):
+    if not _organiser_link():
+        return
+    with st.expander("🔐 Organisers only", expanded=True):
         if st.session_state.get("g_admin_msg"):
             ok, text = st.session_state.pop("g_admin_msg")
             (st.success if ok else st.error)(text)
-        secret = _admin_secret()
+
+        st.markdown("**1. Database check**")
+        if st.button("Check the database", key="g_dbcheck_btn"):
+            with st.spinner("Checking…"):
+                results = db_check()
+            for ok, text in results:
+                (st.success if ok else st.error)(text)
+            if all(ok for ok, _ in results):
+                st.success("Everything looks good. Scores are being saved permanently.")
+
+        st.markdown("**2. Close the week**")
+        secret = _secret("ADMIN_PIN")
         if not secret:
-            st.info("The organiser password is not set. Add ADMIN_PIN in the app's Secrets to use this panel.")
+            st.info("The admin password is not set. Add ADMIN_PIN in the app's Secrets to use this button.")
             return
-        st.caption("Closing a week saves everyone's value as next week's starting point and announces the winner. "
-                   "It cannot be undone from the app. Do it after the market has closed (Saturday or Sunday), "
-                   "so everyone is judged on the same prices.")
+        st.caption("The week already closes by itself on Saturday at 12:00 am IST. Use this only to close it early by hand. "
+                   "It saves everyone's value as next week's starting point and announces the winner. It cannot be undone from the app.")
         password = st.text_input("Admin password", type="password", key="g_admin_pw")
         sure = st.checkbox("I am sure I want to close this week", key="g_admin_sure")
-        if not st.button("Close week", type="primary", key="g_close_btn"):
+        if not st.button("Close week now", type="primary", key="g_close_btn"):
             return
         admin = _memory_db()["admin"]
         if time.time() < admin["until"]:
@@ -812,9 +1036,11 @@ def _rules_panel() -> None:
 - Everyone starts with **{_inr(START_CASH)}** of play money. No real money is ever used.
 - Buy and sell whole shares of the companies tracked on Intellics, at the latest price the free data source has.
   That price can be delayed, so it may differ from the real market.
+- **Weekly ranking:** your % return for the week. The week closes **by itself every Saturday at 12:00 am IST**, and the best
+  return wins. Because it is a percentage, joining late does not stop you from winning a week. Your first week counts from the day you join.
+- **Monthly ranking:** your % return since the end of last month.
 - **Overall ranking:** total portfolio value (cash plus the current value of your shares). It never resets.
-- **Weekly ranking:** your % return for the week. The organiser closes each week, and the best return wins.
-  Because it is a percentage, joining late does not stop you from winning a week. Your first week counts from the day you join.
+- **Titles:** top {WEEK_TOP} each week, top {MONTH_TOP} each month and top {OVERALL_TOP} overall. You must have made at least one trade to earn a title.
 - A player who holds only cash scores 0% for the week, so can win a week when the market falls. That is allowed.
 - No short selling, no borrowing, and no brokerage fees or taxes.
 - **Diversify:** when you buy, one company may be at most **{MAX_POSITION_PCT:.0f}%** of your portfolio.
@@ -823,7 +1049,7 @@ def _rules_panel() -> None:
 **Your data**
 
 We store your nickname, a scrambled version of your PIN, and your trades. Your real name is stored and shown **only if you choose
-to add it**, and you can remove it any time from My portfolio. No email address is collected.
+to add it**, and you can remove it any time from My name. No email address is collected.
 Your PIN has 6 to 8 digits. After {MAX_PIN_TRIES} wrong tries the account locks for {LOCK_MINUTES} minutes. There is no PIN reset, so remember it.
 
 **Important**
@@ -855,10 +1081,12 @@ def game_tab(companies: dict[str, str], get_prices: Callable[[], dict], nifty_ti
             _rules_panel()
         return
 
+    weeks: list[dict] = []
     try:
-        base = week_bases(_cached_weeks(db_mode())).get(player["nick_key"], START_CASH)
+        weeks = _cached_weeks(db_mode())
     except GameDBError:
-        base = START_CASH
+        pass
+    base = week_bases(weeks).get(player["nick_key"], START_CASH)
     total, _, no_price = portfolio_value(player, price_of)
     ret = (total / START_CASH - 1) * 100
     left, right = st.columns([3, 1])
@@ -871,6 +1099,13 @@ def game_tab(companies: dict[str, str], get_prices: Callable[[], dict], nifty_ti
     _tiles(tiles)
     if no_price:
         st.caption(f"{no_price} holding(s) have no live price right now and are valued at your purchase price.")
+    try:  # your titles, if any
+        board = build_board(_cached_list(db_mode()), price_of, nifty_now, week_bases(weeks), month_bases(weeks))
+        mine = titles_of(award_titles(board), player["nick_key"])
+        if mine:
+            st.success("Your titles right now: " + " · ".join(mine))
+    except GameDBError:
+        pass
 
     trade_tab, folio_tab, board_tab, name_tab, rules_tab = st.tabs(
         ["📈 Trade", "💼 My portfolio", "🏅 Leaderboard", "👤 My name", "📜 Rules"])
