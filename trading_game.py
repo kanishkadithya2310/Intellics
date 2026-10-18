@@ -1,13 +1,19 @@
 """Intellics Trading Challenge: a virtual stock-trading competition.
 
 Everyone starts with Rs 10,00,000 of PLAY money and trades the companies tracked by the app at the latest
-(possibly delayed) price. A shared leaderboard ranks everybody. No real money is involved.
+(possibly delayed) price. No real money is involved.
+
+Rankings
+- Overall: total portfolio value. Never resets.
+- This week: % return since the last "Close week" (or since the player joined). Because it is a % return,
+  somebody who joins late can still win the week.
+- Weekly winners: the winner of every closed week.
 
 Where the scores are kept
 - Nothing to set up: the game runs in PRACTICE MODE. Scores live in the app's memory and are lost whenever the
   app restarts or goes to sleep. Fine for a demo.
-- Permanent scores: connect a free Supabase database (see SUPABASE_SQL below and the two secrets
-  SUPABASE_URL and SUPABASE_KEY). The game switches to it automatically.
+- Permanent scores: connect a free Supabase database (run supabase_setup.sql, then add the secrets
+  SUPABASE_URL, SUPABASE_KEY and ADMIN_PIN). The game switches to it automatically.
 
 This file must sit next to app.py. app.py calls trading_game.game_tab(...).
 """
@@ -23,8 +29,9 @@ import re
 import secrets
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable
+from zoneinfo import ZoneInfo
 
 import plotly.graph_objects as go
 import requests
@@ -41,31 +48,20 @@ BOARD_SIZE = 25               # rows shown on the leaderboard
 BOARD_REFRESH = 60            # seconds between automatic leaderboard refreshes
 TRADE_LOG_LIMIT = 300         # trades remembered per player
 MAX_PLAYERS_PRACTICE = 500    # safety cap in practice mode
-MAX_PIN_TRIES = 5             # wrong PINs allowed per visit before a short wait
-LOCK_SECONDS = 60
+MAX_PIN_TRIES = 5             # wrong PINs allowed before the account is locked
+LOCK_MINUTES = 15             # how long a locked account stays locked (saved in the database)
+MIN_WEEK_GAP_MINUTES = 30     # protects against closing the week twice by accident
+MIN_PRICE_COVERAGE = 0.7      # at least this share of companies must have a price before a week can be closed
+ADMIN_MAX_TRIES = 5           # wrong admin passwords allowed before the organiser panel pauses
+ADMIN_LOCK_MINUTES = 15
+WEEKS_SHOWN = 12              # closed weeks kept on screen
+IST = ZoneInfo("Asia/Kolkata")
 PLOT_KW = {} if hasattr(st, "iframe") else {"use_container_width": True}  # new vs old Streamlit (same trick as app.py)
 
-SUPABASE_SQL = """
-create table if not exists players (
-  season      text not null,
-  nick_key    text not null,
-  display     text not null,
-  salt        text not null,
-  pin_hash    text not null,
-  cash        numeric not null,
-  holdings    jsonb not null default '{}'::jsonb,
-  trades      jsonb not null default '[]'::jsonb,
-  realized    numeric not null default 0,
-  start_nifty numeric,
-  created_at  timestamptz not null default now(),
-  primary key (season, nick_key)
-);
-alter table players enable row level security;  -- nobody can read it with the public key; only your secret key can
-"""
-
 NICK_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.-]{2,19}$")
-PIN_RE = re.compile(r"^\d{4,8}$")
-PUBLIC_COLUMNS = "nick_key,display,cash,holdings,start_nifty,created_at"
+PIN_RE = re.compile(r"^\d{6,8}$")
+NAME_RE = re.compile(r"^[A-Za-z][A-Za-z .'\-]{1,39}$")
+PUBLIC_COLUMNS = "nick_key,display,real_name,cash,holdings,start_nifty,created_at"
 
 
 class GameDBError(Exception):
@@ -104,10 +100,37 @@ def _md_safe(text: str) -> str:
     return re.sub(r"([\\`*_\[\]$~#<>|])", r"\\\1", text)
 
 
+def _who(display: str, real: str | None) -> str:
+    """HTML for a trader's name: the real name (if they chose to share it) with the nickname in brackets."""
+    if real:
+        return f'{_esc(real)} <span style="opacity:.65">({_esc(display)})</span>'
+    return _esc(display)
+
+
+def _who_plain(display: str, real: str | None) -> str:
+    return f"{real} ({display})" if real else display
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _iso(dt: datetime) -> str:
+    return dt.isoformat(timespec="seconds")
+
+
+def _parse_ts(text) -> datetime | None:
+    try:
+        dt = datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
 # ---------------------------------------------------------------- storage
 @st.cache_resource
 def _memory_db() -> dict:
-    return {"players": {}, "lock": threading.Lock()}
+    return {"players": {}, "weeks": [], "lock": threading.Lock(), "admin": {"fails": 0, "until": 0.0}}
 
 
 def _sb_config() -> tuple[str, str] | None:
@@ -123,7 +146,7 @@ def db_mode() -> str:
     return "supabase" if _sb_config() else "practice"
 
 
-def _sb(method: str, params: dict, body: dict | None = None) -> list:
+def _sb(table: str, method: str, params: dict | None = None, body: dict | None = None) -> list:
     cfg = _sb_config()
     if not cfg:
         raise GameDBError("The score database is not set up.")
@@ -131,15 +154,17 @@ def _sb(method: str, params: dict, body: dict | None = None) -> list:
     headers = {"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json",
                "Prefer": "return=representation"}
     try:
-        resp = requests.request(method, f"{url}/rest/v1/players", headers=headers, params=params, json=body, timeout=10)
+        resp = requests.request(method, f"{url}/rest/v1/{table}", headers=headers, params=params or {}, json=body, timeout=10)
     except requests.RequestException as exc:
         log.warning("Supabase unreachable: %s", exc)
         raise GameDBError("Could not reach the score database. Please try again in a moment.") from exc
     if resp.status_code == 409:
-        raise GameDBError("That nickname is already taken. Pick another.")
+        raise GameDBError("That nickname is already taken. Pick another." if table == "players"
+                          else "That week has already been closed.")
     if resp.status_code >= 400:
-        log.warning("Supabase error %s: %s", resp.status_code, resp.text[:200])  # never log the key
-        raise GameDBError("The score database refused the request. The site owner should check the Supabase URL, key and table.")
+        log.warning("Supabase error %s on %s: %s", resp.status_code, table, resp.text[:200])  # never log the key
+        raise GameDBError("The score database refused the request. The site owner should check the Supabase URL, "
+                          "key and tables (run supabase_setup.sql again).")
     try:
         return resp.json() if resp.text else []
     except ValueError:
@@ -156,12 +181,14 @@ def _normalize(player: dict) -> dict:
     player["trades"] = list(player.get("trades") or [])
     start = player.get("start_nifty")
     player["start_nifty"] = float(start) if start else None
+    player["real_name"] = (player.get("real_name") or "").strip()
+    player["pin_fails"] = int(player.get("pin_fails") or 0)
     return player
 
 
 def db_get(nick_key: str) -> dict | None:
     if _sb_config():
-        rows = _sb("GET", {"season": f"eq.{SEASON}", "nick_key": f"eq.{nick_key}", "select": "*"})
+        rows = _sb("players", "GET", {"season": f"eq.{SEASON}", "nick_key": f"eq.{nick_key}", "select": "*"})
         return _normalize(rows[0]) if rows else None
     mem = _memory_db()
     with mem["lock"]:
@@ -172,7 +199,7 @@ def db_get(nick_key: str) -> dict | None:
 def db_list() -> list[dict]:
     """Public columns of every player this season (never the PIN hash)."""
     if _sb_config():
-        rows = _sb("GET", {"season": f"eq.{SEASON}", "select": PUBLIC_COLUMNS, "limit": "1000"})
+        rows = _sb("players", "GET", {"season": f"eq.{SEASON}", "select": PUBLIC_COLUMNS, "limit": "1000"})
     else:
         mem = _memory_db()
         with mem["lock"]:
@@ -182,7 +209,7 @@ def db_list() -> list[dict]:
 
 def db_insert(player: dict) -> None:
     if _sb_config():
-        _sb("POST", {}, body=player)
+        _sb("players", "POST", body=player)
         return
     mem = _memory_db()
     with mem["lock"]:
@@ -193,15 +220,40 @@ def db_insert(player: dict) -> None:
         mem["players"][player["nick_key"]] = json.loads(json.dumps(player))
 
 
-def db_save(player: dict) -> None:
-    body = {k: player[k] for k in ("cash", "holdings", "trades", "realized")}
+def db_patch(nick_key: str, fields: dict) -> None:
     if _sb_config():
-        _sb("PATCH", {"season": f"eq.{SEASON}", "nick_key": f"eq.{player['nick_key']}"}, body=body)
+        _sb("players", "PATCH", {"season": f"eq.{SEASON}", "nick_key": f"eq.{nick_key}"}, body=fields)
         return
     mem = _memory_db()
     with mem["lock"]:
-        if player["nick_key"] in mem["players"]:
-            mem["players"][player["nick_key"]].update(json.loads(json.dumps(body)))
+        if nick_key in mem["players"]:
+            mem["players"][nick_key].update(json.loads(json.dumps(fields)))
+
+
+def db_save(player: dict) -> None:
+    db_patch(player["nick_key"], {k: player[k] for k in ("cash", "holdings", "trades", "realized")})
+
+
+def db_weeks(limit: int = WEEKS_SHOWN) -> list[dict]:
+    """Closed weeks of this season, newest first."""
+    if _sb_config():
+        rows = _sb("game_weeks", "GET", {"season": f"eq.{SEASON}", "select": "*", "order": "week_no.desc", "limit": str(limit)})
+    else:
+        mem = _memory_db()
+        with mem["lock"]:
+            rows = json.loads(json.dumps(sorted(mem["weeks"], key=lambda w: w["week_no"], reverse=True)[:limit]))
+    return rows
+
+
+def db_insert_week(row: dict) -> None:
+    if _sb_config():
+        _sb("game_weeks", "POST", body=row)
+        return
+    mem = _memory_db()
+    with mem["lock"]:
+        if any(w["week_no"] == row["week_no"] for w in mem["weeks"]):
+            raise GameDBError("That week has already been closed.")
+        mem["weeks"].append(json.loads(json.dumps(row)))
 
 
 @st.cache_data(ttl=20, show_spinner=False)
@@ -209,35 +261,95 @@ def _cached_list(mode: str) -> list[dict]:
     return db_list()
 
 
+@st.cache_data(ttl=20, show_spinner=False)
+def _cached_weeks(mode: str) -> list[dict]:
+    return db_weeks()
+
+
+def _clear_caches() -> None:
+    _cached_list.clear()
+    _cached_weeks.clear()
+
+
 # ----------------------------------------------------------- accounts (nickname + PIN)
 def _hash_pin(pin: str, salt_hex: str) -> str:
     return hashlib.pbkdf2_hmac("sha256", pin.encode(), bytes.fromhex(salt_hex), 150_000).hex()
 
 
-def register(nickname: str, pin: str, nifty_price: float | None) -> tuple[dict | None, str]:
+def _weak_pin(pin: str) -> bool:
+    """Repeated digits (111111) or a plain run (123456, 654321)."""
+    if len(set(pin)) == 1:
+        return True
+    digits = [int(c) for c in pin]
+    return {digits[i + 1] - digits[i] for i in range(len(digits) - 1)} in ({1}, {-1})
+
+
+def clean_real_name(raw: str) -> tuple[str, str]:
+    """Returns (cleaned name, error). An empty name is fine: it means 'show my nickname only'."""
+    name = re.sub(r"\s+", " ", (raw or "").strip())
+    if not name:
+        return "", ""
+    if not NAME_RE.match(name):
+        return "", "Real name should be 2 to 40 letters (spaces, dots, hyphens allowed), or leave it empty."
+    return name, ""
+
+
+def register(nickname: str, pin: str, nifty_price: float | None, real_name: str = "") -> tuple[dict | None, str]:
     display = re.sub(r"\s+", " ", nickname.strip())
     if not NICK_RE.match(display):
         return None, "Nickname must be 3 to 20 characters: letters, numbers, spaces, dot, dash or underscore."
     if not PIN_RE.match(pin):
-        return None, "PIN must be 4 to 8 digits."
+        return None, "PIN must be 6 to 8 digits."
+    if _weak_pin(pin):
+        return None, "That PIN is too easy to guess. Avoid repeated digits (like 111111) and simple runs (like 123456)."
+    name, err = clean_real_name(real_name)
+    if err:
+        return None, err
     key = display.lower()
     if db_get(key):
         return None, "That nickname is already taken. Pick another."
     salt = secrets.token_hex(16)
-    player = {"season": SEASON, "nick_key": key, "display": display, "salt": salt, "pin_hash": _hash_pin(pin, salt),
-              "cash": START_CASH, "holdings": {}, "trades": [], "realized": 0.0,
-              "start_nifty": nifty_price, "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    player = {"season": SEASON, "nick_key": key, "display": display, "real_name": name or None, "salt": salt,
+              "pin_hash": _hash_pin(pin, salt), "cash": START_CASH, "holdings": {}, "trades": [], "realized": 0.0,
+              "start_nifty": nifty_price, "created_at": _iso(_now())}
     db_insert(player)
     return _normalize(player), ""
 
 
+def _lock_remaining(player: dict) -> float:
+    until = _parse_ts(player.get("lock_until"))
+    return max(0.0, (until - _now()).total_seconds()) if until else 0.0
+
+
 def login(nickname: str, pin: str) -> tuple[dict | None, str]:
+    """The wrong-PIN counter and the lock are saved in the database, so refreshing the page does not clear them."""
     key = re.sub(r"\s+", " ", nickname.strip()).lower()
     player = db_get(key) if key else None
+    if player:
+        left = _lock_remaining(player)
+        if left > 0:
+            return None, f"Too many wrong tries. This account is locked for about {math.ceil(left / 60)} more minute(s)."
     salt = (player or {}).get("salt") or "00" * 16
     ok = hmac.compare_digest(_hash_pin(pin, salt), (player or {}).get("pin_hash", "x"))
-    if not player or not ok:
+    if not player:
         return None, "Wrong nickname or PIN."
+    if not ok:
+        fails = player.get("pin_fails", 0) + 1
+        patch: dict = {"pin_fails": fails}
+        message = "Wrong nickname or PIN."
+        if fails >= MAX_PIN_TRIES:
+            patch = {"pin_fails": 0, "lock_until": _iso(_now() + timedelta(minutes=LOCK_MINUTES))}
+            message = f"Too many wrong tries. This account is locked for {LOCK_MINUTES} minutes."
+        try:
+            db_patch(key, patch)
+        except GameDBError:
+            pass  # a failed counter update must never let the login through, and it never does
+        return None, message
+    if player.get("pin_fails") or player.get("lock_until"):
+        try:
+            db_patch(key, {"pin_fails": 0, "lock_until": None})
+        except GameDBError:
+            pass
     return player, ""
 
 
@@ -297,13 +409,22 @@ def execute_trade(player: dict, ticker: str, name: str, side: str, qty: int, pri
     else:
         return False, "Choose Buy or Sell."
 
-    player["trades"].append({"t": datetime.now(timezone.utc).isoformat(timespec="seconds"), "side": side,
-                             "ticker": ticker, "name": name, "qty": qty, "price": round(price, 2)})
+    player["trades"].append({"t": _iso(_now()), "side": side, "ticker": ticker, "name": name, "qty": qty,
+                             "price": round(price, 2)})
     del player["trades"][:-TRADE_LOG_LIMIT]
     return True, message
 
 
-def build_board(players: list[dict], price_of: dict[str, float], nifty_now: float | None) -> list[dict]:
+def week_bases(weeks: list[dict]) -> dict[str, float]:
+    """Each player's value at the last 'Close week'. Anyone not in that list joined later and starts from START_CASH."""
+    if not weeks:
+        return {}
+    return {r["key"]: float(r["end"]) for r in (weeks[0].get("results") or []) if r.get("key")}
+
+
+def build_board(players: list[dict], price_of: dict[str, float], nifty_now: float | None,
+                base_of: dict[str, float] | None = None) -> list[dict]:
+    base_of = base_of or {}
     rows = []
     for p in players:
         total, _, no_price = portfolio_value(p, price_of)
@@ -311,10 +432,53 @@ def build_board(players: list[dict], price_of: dict[str, float], nifty_now: floa
         beat = None
         if nifty_now and p.get("start_nifty"):
             beat = ret - (nifty_now / p["start_nifty"] - 1) * 100
-        rows.append({"key": p["nick_key"], "name": p["display"], "total": total, "ret": ret, "beat": beat,
-                     "positions": len(p["holdings"]), "no_price": no_price})
-    rows.sort(key=lambda r: r["total"], reverse=True)
+        base = base_of.get(p["nick_key"], START_CASH)
+        rows.append({"key": p["nick_key"], "name": p["display"], "real": p.get("real_name") or "", "total": total,
+                     "ret": ret, "beat": beat, "positions": len(p["holdings"]), "no_price": no_price,
+                     "base": base, "week_ret": (total / base - 1) * 100 if base > 0 else 0.0})
     return rows
+
+
+def compute_week(players: list[dict], price_of: dict[str, float], base_of: dict[str, float]) -> list[dict]:
+    """Final result of one week for every player, best first. Ties go to the higher portfolio value."""
+    results = []
+    for r in build_board(players, price_of, None, base_of):
+        results.append({"key": r["key"], "name": r["name"], "real": r["real"], "start": round(r["base"], 2),
+                        "end": round(r["total"], 2), "ret": round(r["week_ret"], 4)})
+    results.sort(key=lambda r: (r["ret"], r["end"]), reverse=True)
+    return results
+
+
+def close_week(prices: dict, tracked_tickers: list[str]) -> tuple[bool, str]:
+    """Organiser action. Saves the winner and everyone's closing value (the next week's starting point)."""
+    price_of = {t: v[0] for t, v in prices.items() if v and v[0]}
+    tracked = list(tracked_tickers)
+    if not tracked or sum(1 for t in tracked if t in price_of) < MIN_PRICE_COVERAGE * len(tracked):
+        return False, "Prices did not load properly, so the week was NOT closed. Wait a minute and try again."
+    try:
+        players = db_list()
+        if not players:
+            return False, "There are no players yet, so there is nothing to close."
+        weeks = db_weeks(1)
+        last = weeks[0] if weeks else None
+        if last:
+            closed = _parse_ts(last.get("closed_at"))
+            if closed and _now() - closed < timedelta(minutes=MIN_WEEK_GAP_MINUTES):
+                return False, (f"Week {last['week_no']} was closed less than {MIN_WEEK_GAP_MINUTES} minutes ago, "
+                               "so this looks like a double click. Nothing was changed.")
+        missing = sorted({t for p in players for t in p["holdings"] if t not in price_of})
+        if missing:
+            return False, (f"No price for {len(missing)} share(s) that players hold ({', '.join(missing[:3])}"
+                           f"{'...' if len(missing) > 3 else ''}). The week was NOT closed. Try again in a minute.")
+        results = compute_week(players, price_of, week_bases(weeks))
+        week_no = int(last["week_no"]) + 1 if last else 1
+        win = results[0]
+        db_insert_week({"season": SEASON, "week_no": week_no, "closed_at": _iso(_now()), "winner_key": win["key"],
+                        "winner_name": win["name"], "winner_ret": win["ret"], "results": results})
+    except GameDBError as exc:
+        return False, str(exc)
+    _clear_caches()
+    return True, f"Week {week_no} closed. Winner: {_who_plain(win['name'], win['real'])} with {_pct(win['ret'])}."
 
 
 # ----------------------------------------------------------------- display helpers
@@ -355,6 +519,11 @@ def _clear_login() -> None:
         st.session_state.pop(key, None)
 
 
+def _day(ts_text) -> str:
+    ts = _parse_ts(ts_text)
+    return f"{ts.astimezone(IST):%d %b %Y}" if ts else "-"
+
+
 # ------------------------------------------------------------------ pieces of the page
 def _mode_banner() -> None:
     if db_mode() == "practice":
@@ -371,35 +540,33 @@ def _auth_panel(nifty_price: float | None) -> None:
             pin = st.text_input("PIN", type="password", key="g_login_pin", max_chars=8)
             go_login = st.form_submit_button("Log in", type="primary")
         if go_login:
-            if time.time() < ss.get("g_lock_until", 0):
-                st.error(f"Too many wrong tries. Please wait about {int(ss['g_lock_until'] - time.time()) + 1} seconds.")
-            else:
-                try:
-                    player, err = login(nick, pin)
-                except GameDBError as exc:
-                    player, err = None, str(exc)
-                if player:
-                    ss.update(g_nick=player["nick_key"], g_player=player, g_fails=0)
-                    st.rerun()
-                ss["g_fails"] = ss.get("g_fails", 0) + 1
-                if ss["g_fails"] >= MAX_PIN_TRIES:
-                    ss["g_lock_until"], ss["g_fails"] = time.time() + LOCK_SECONDS, 0
-                st.error(err)
+            try:
+                player, err = login(nick, pin)
+            except GameDBError as exc:
+                player, err = None, str(exc)
+            if player:
+                ss.update(g_nick=player["nick_key"], g_player=player)
+                st.rerun()
+            st.error(err)
     with join_tab:
         st.write(f"Start with **{_inr(START_CASH)}** of play money and see how you rank against everyone else.")
         with st.form("g_join_form"):
             nick = st.text_input("Choose a nickname (shown publicly)", key="g_join_nick", max_chars=20,
                                  help="3 to 20 characters. Please do not use anyone else's name.")
-            pin = st.text_input("Choose a PIN (4 to 8 digits)", type="password", key="g_join_pin", max_chars=8,
+            real = st.text_input("Your real name (optional)", key="g_join_real", max_chars=40,
+                                 help="Leave this empty to appear only by your nickname. If you fill it in, "
+                                      "your name will be shown publicly on the leaderboard.")
+            st.caption("Optional: add your real name only if you want it published on the leaderboard.")
+            pin = st.text_input("Choose a PIN (6 to 8 digits)", type="password", key="g_join_pin", max_chars=8,
                                 help="You need it to log back in. It is stored scrambled, but do not reuse a PIN from anywhere else.")
             go_join = st.form_submit_button("Start trading", type="primary")
         if go_join:
             try:
-                player, err = register(nick, pin, nifty_price)
+                player, err = register(nick, pin, nifty_price, real)
             except GameDBError as exc:
                 player, err = None, str(exc)
             if player:
-                _cached_list.clear()
+                _clear_caches()
                 ss.update(g_nick=player["nick_key"], g_player=player,
                           g_flash=f"Welcome, {player['display']}! You have {_inr(START_CASH)} to invest.")
                 st.rerun()
@@ -420,7 +587,7 @@ def _place_order(player: dict, ticker: str, name: str, side: str, qty: int, pric
     except GameDBError as exc:
         st.error(str(exc))
         return
-    _cached_list.clear()
+    _clear_caches()
     st.session_state["g_player"] = fresh
     st.session_state["g_flash"] = message
     st.rerun()
@@ -452,6 +619,31 @@ def _trade_panel(player: dict, companies: dict[str, str], prices: dict, price_of
     st.write(f"Order value: **{_inr(qty * price, 2)}**")
     if st.button(f"Place {side.lower()} order", type="primary", key="g_place", disabled=not TRADING_OPEN):
         _place_order(player, ticker, name, side, qty, price, price_of)
+
+
+def _name_panel(player: dict) -> None:
+    """Lets a player add, change or remove the real name shown next to their nickname."""
+    if True:
+        st.caption("Your nickname is always shown. If you add your real name, it is shown publicly next to it. "
+                   "Empty the box and save to show only your nickname.")
+        with st.form("g_name_form"):
+            new = st.text_input("Real name", value=player.get("real_name") or "", key="g_real_edit", max_chars=40)
+            save = st.form_submit_button("Save name")
+        if save:
+            name, err = clean_real_name(new)
+            if err:
+                st.error(err)
+                return
+            try:
+                db_patch(player["nick_key"], {"real_name": name or None})
+            except GameDBError as exc:
+                st.error(str(exc))
+                return
+            player["real_name"] = name
+            st.session_state["g_player"] = player
+            _clear_caches()
+            st.session_state["g_flash"] = "Name saved." if name else "Name removed. Only your nickname is shown."
+            st.rerun()
 
 
 def _portfolio_panel(player: dict, price_of: dict) -> None:
@@ -492,36 +684,126 @@ def _portfolio_panel(player: dict, price_of: dict) -> None:
                     for t in trades])
 
 
+def _week_tab(board: list[dict], weeks: list[dict], me: str | None) -> None:
+    week_no = (int(weeks[0]["week_no"]) if weeks else 0) + 1
+    since = f"since {_day(weeks[0].get('closed_at'))}" if weeks else "since each player joined"
+    st.markdown(f"**Week {week_no}** · % return {since}")
+    ranked = sorted(board, key=lambda r: (r["week_ret"], r["total"]), reverse=True)
+    medals = {0: "🥇", 1: "🥈", 2: "🥉"}
+    rows, me_row = [], None
+    for i, r in enumerate(ranked[:BOARD_SIZE]):
+        if r["key"] == me:
+            me_row = i
+        rows.append([medals.get(i, str(i + 1)), _who(r["name"], r["real"]),
+                     f'<span class="{_cls(r["week_ret"])}">{_pct(r["week_ret"])}</span>', _inr(r["total"]), str(r["positions"])])
+    _table([("#", False), ("Trader", False), ("This week", True), ("Portfolio value", True), ("Stocks", True)], rows, me_row)
+    mine = next((i for i, r in enumerate(ranked) if r["key"] == me), None) if me else None
+    if mine is not None and me_row is None:
+        st.caption(f"Your rank this week: #{mine + 1} of {len(ranked)} ({_pct(ranked[mine]['week_ret'])})")
+    st.caption("Ranked by % return, so joining late does not hurt you. A week ends when the organiser closes it.")
+
+
+def _overall_tab(board: list[dict], me: str | None) -> None:
+    ranked = sorted(board, key=lambda r: r["total"], reverse=True)
+    medals = {0: "🥇", 1: "🥈", 2: "🥉"}
+    rows, me_row = [], None
+    for i, r in enumerate(ranked[:BOARD_SIZE]):
+        if r["key"] == me:
+            me_row = i
+        beat = "-" if r["beat"] is None else f'<span class="{_cls(r["beat"])}">{_pct(r["beat"])}</span>'
+        rows.append([medals.get(i, str(i + 1)), _who(r["name"], r["real"]), _inr(r["total"]),
+                     f'<span class="{_cls(r["ret"])}">{_pct(r["ret"])}</span>', beat, str(r["positions"])])
+    _table([("#", False), ("Trader", False), ("Portfolio value", True), ("Return", True), ("vs Nifty 50", True), ("Stocks", True)],
+           rows, me_row)
+    mine = next((i for i, r in enumerate(ranked) if r["key"] == me), None) if me else None
+    if mine is not None and me_row is None:
+        st.caption(f"Your overall rank: #{mine + 1} of {len(ranked)} ({_inr(ranked[mine]['total'])})")
+    st.caption("Ranked by total portfolio value. Never resets. 'vs Nifty 50' compares your return with the Nifty since you joined.")
+
+
+def _winners_tab(weeks: list[dict]) -> None:
+    if not weeks:
+        st.info("No week has been closed yet. The first winner will appear here.")
+        return
+    rows = []
+    for w in weeks:
+        res = w.get("results") or []
+        top = res[0] if res else {"name": w.get("winner_name", "-"), "real": "", "ret": w.get("winner_ret") or 0.0}
+        rows.append([f"Week {w['week_no']}", _day(w.get("closed_at")), _who(top["name"], top.get("real")),
+                     f'<span class="{_cls(top["ret"])}">{_pct(top["ret"])}</span>', str(len(res))])
+    _table([("Week", False), ("Closed on", False), ("Winner", False), ("Return", True), ("Players", True)], rows)
+    for w in weeks[:5]:
+        res = (w.get("results") or [])[:5]
+        if not res:
+            continue
+        with st.expander(f"Week {w['week_no']}: top {len(res)}"):
+            _table([("#", False), ("Trader", False), ("Return", True), ("Value at close", True)],
+                   [[str(i + 1), _who(r["name"], r.get("real")), f'<span class="{_cls(r["ret"])}">{_pct(r["ret"])}</span>',
+                     _inr(r["end"])] for i, r in enumerate(res)])
+
+
 @st.fragment(run_every=f"{BOARD_REFRESH}s")
 def leaderboard_section(get_prices: Callable[[], dict], nifty_ticker: str, me: str | None) -> None:
     prices = get_prices()
     price_of = {t: v[0] for t, v in prices.items()}
     try:
         players = _cached_list(db_mode())
+        weeks = _cached_weeks(db_mode())
     except GameDBError as exc:
         st.warning(str(exc))
         return
-    board = build_board(players, price_of, price_of.get(nifty_ticker))
     st.subheader("🏅 Leaderboard")
-    if not board:
+    if not players:
         st.info("No traders yet. Be the first to join!")
         return
-    medals = {0: "🥇", 1: "🥈", 2: "🥉"}
-    rows, me_row = [], None
-    for i, r in enumerate(board[:BOARD_SIZE]):
-        if r["key"] == me:
-            me_row = i
-        beat = "-" if r["beat"] is None else f'<span class="{_cls(r["beat"])}">{_pct(r["beat"])}</span>'
-        rows.append([medals.get(i, str(i + 1)), _esc(r["name"]), _inr(r["total"]),
-                     f'<span class="{_cls(r["ret"])}">{_pct(r["ret"])}</span>', beat, str(r["positions"])])
-    _table([("#", False), ("Trader", False), ("Portfolio value", True), ("Return", True), ("vs Nifty 50", True), ("Stocks", True)],
-           rows, me_row)
-    if me and me_row is None:
-        mine = next((i for i, r in enumerate(board) if r["key"] == me), None)
-        if mine is not None:
-            st.caption(f"Your rank: #{mine + 1} of {len(board)} ({_inr(board[mine]['total'])})")
-    st.caption(f"{len(board)} trader(s) this season · ranked by total portfolio value · refreshes about every {BOARD_REFRESH} sec. "
-               "'vs Nifty 50' compares your return with the Nifty since you joined.")
+    board = build_board(players, price_of, price_of.get(nifty_ticker), week_bases(weeks))
+    week_tab, overall_tab, winners_tab = st.tabs(["This week", "Overall", "Weekly winners"])
+    with week_tab:
+        _week_tab(board, weeks, me)
+    with overall_tab:
+        _overall_tab(board, me)
+    with winners_tab:
+        _winners_tab(weeks)
+    st.caption(f"{len(board)} trader(s) this season · refreshes about every {BOARD_REFRESH} sec")
+
+
+def _admin_secret() -> str:
+    try:
+        return str(st.secrets.get("ADMIN_PIN", "") or "")
+    except Exception:
+        return ""
+
+
+def _organiser_panel(get_prices: Callable[[], dict], companies: dict[str, str]) -> None:
+    with st.expander("🔐 Organisers only"):
+        if st.session_state.get("g_admin_msg"):
+            ok, text = st.session_state.pop("g_admin_msg")
+            (st.success if ok else st.error)(text)
+        secret = _admin_secret()
+        if not secret:
+            st.info("The organiser password is not set. Add ADMIN_PIN in the app's Secrets to use this panel.")
+            return
+        st.caption("Closing a week saves everyone's value as next week's starting point and announces the winner. "
+                   "It cannot be undone from the app. Do it after the market has closed (Saturday or Sunday), "
+                   "so everyone is judged on the same prices.")
+        password = st.text_input("Admin password", type="password", key="g_admin_pw")
+        sure = st.checkbox("I am sure I want to close this week", key="g_admin_sure")
+        if not st.button("Close week", type="primary", key="g_close_btn"):
+            return
+        admin = _memory_db()["admin"]
+        if time.time() < admin["until"]:
+            st.error(f"Too many wrong passwords. Try again in about {int((admin['until'] - time.time()) // 60) + 1} minute(s).")
+        elif not hmac.compare_digest(password.encode(), secret.encode()):
+            admin["fails"] += 1
+            if admin["fails"] >= ADMIN_MAX_TRIES:
+                admin["fails"], admin["until"] = 0, time.time() + ADMIN_LOCK_MINUTES * 60
+            st.error("Wrong password.")
+        elif not sure:
+            st.warning("Tick the box to confirm.")
+        else:
+            admin["fails"] = 0
+            st.session_state["g_admin_msg"] = close_week(get_prices(), list(companies.values()))
+            st.rerun()
 
 
 def _rules_panel() -> None:
@@ -530,15 +812,19 @@ def _rules_panel() -> None:
 - Everyone starts with **{_inr(START_CASH)}** of play money. No real money is ever used.
 - Buy and sell whole shares of the companies tracked on Intellics, at the latest price the free data source has.
   That price can be delayed, so it may differ from the real market.
-- The leaderboard ranks everyone by **total portfolio value** (cash plus the current value of your shares).
+- **Overall ranking:** total portfolio value (cash plus the current value of your shares). It never resets.
+- **Weekly ranking:** your % return for the week. The organiser closes each week, and the best return wins.
+  Because it is a percentage, joining late does not stop you from winning a week. Your first week counts from the day you join.
+- A player who holds only cash scores 0% for the week, so can win a week when the market falls. That is allowed.
 - No short selling, no borrowing, and no brokerage fees or taxes.
 - **Diversify:** when you buy, one company may be at most **{MAX_POSITION_PCT:.0f}%** of your portfolio.
 - One account per person, please. Pick a nickname that is fine to show publicly.
 
 **Your data**
 
-We store only your nickname, a scrambled version of your PIN, and your trades. No email, no real name.
-There is no PIN reset, so remember it.
+We store your nickname, a scrambled version of your PIN, and your trades. Your real name is stored and shown **only if you choose
+to add it**, and you can remove it any time from My portfolio. No email address is collected.
+Your PIN has 6 to 8 digits. After {MAX_PIN_TRIES} wrong tries the account locks for {LOCK_MINUTES} minutes. There is no PIN reset, so remember it.
 
 **Important**
 
@@ -564,29 +850,39 @@ def game_tab(companies: dict[str, str], get_prices: Callable[[], dict], nifty_ti
     if not player:
         _auth_panel(nifty_now)
         leaderboard_section(get_prices, nifty_ticker, None)
+        _organiser_panel(get_prices, companies)
         with st.expander("Rules"):
             _rules_panel()
         return
 
+    try:
+        base = week_bases(_cached_weeks(db_mode())).get(player["nick_key"], START_CASH)
+    except GameDBError:
+        base = START_CASH
     total, _, no_price = portfolio_value(player, price_of)
     ret = (total / START_CASH - 1) * 100
     left, right = st.columns([3, 1])
-    left.markdown(f"**Trader: {_md_safe(player['display'])}**")
+    left.markdown(f"**Trader: {_md_safe(_who_plain(player['display'], player.get('real_name')))}**")
     right.button("Log out", on_click=_clear_login, key="g_logout")
-    tiles = [("Portfolio value", _inr(total), ret), ("Cash", _inr(player["cash"]), None),
-             ("Realised profit", _inr(player.get("realized", 0.0)), None)]
+    tiles = [("Portfolio value", _inr(total), ret), ("This week", _pct((total / base - 1) * 100), None),
+             ("Cash", _inr(player["cash"]), None), ("Realised profit", _inr(player.get("realized", 0.0)), None)]
     if nifty_now and player.get("start_nifty"):
         tiles.append(("Nifty 50 since you joined", _pct((nifty_now / player["start_nifty"] - 1) * 100), None))
     _tiles(tiles)
     if no_price:
         st.caption(f"{no_price} holding(s) have no live price right now and are valued at your purchase price.")
 
-    trade_tab, folio_tab, board_tab, rules_tab = st.tabs(["📈 Trade", "💼 My portfolio", "🏅 Leaderboard", "📜 Rules"])
+    trade_tab, folio_tab, board_tab, name_tab, rules_tab = st.tabs(
+        ["📈 Trade", "💼 My portfolio", "🏅 Leaderboard", "👤 My name", "📜 Rules"])
     with trade_tab:
         _trade_panel(player, companies, prices, price_of)
     with folio_tab:
         _portfolio_panel(player, price_of)
     with board_tab:
         leaderboard_section(get_prices, nifty_ticker, player["nick_key"])
+        _organiser_panel(get_prices, companies)
+    with name_tab:
+        st.markdown("#### Leaderboard name (optional)")
+        _name_panel(player)
     with rules_tab:
         _rules_panel()
