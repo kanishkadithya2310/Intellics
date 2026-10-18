@@ -28,12 +28,10 @@ div[class*="st-key-card_"]:hover{{transform:translateY(-3px);border-color:rgba(1
 .brand::after{{content:"";position:absolute;width:240px;height:240px;right:-90px;top:-150px;border-radius:50%;background:rgba(115,126,255,.18);filter:blur(4px);pointer-events:none}}
 .brand > *{{position:relative;z-index:1}}
 .hero-eyebrow{{display:inline-flex;align-items:center;gap:7px;font-size:.68rem;font-weight:700;letter-spacing:.13em;color:#c7d2fe;margin-bottom:.34rem}}
-.hero-eyebrow::before{{content:"";width:7px;height:7px;border-radius:50%;background:#5eead4;box-shadow:0 0 12px #5eead4}}
+.hero-eyebrow::before{{--c:#5eead4;content:"";width:8px;height:8px;border-radius:50%;background:radial-gradient(circle at 50% 50%,#fff 0,var(--c) 45%,var(--c) 100%);box-shadow:0 0 2px #fff,0 0 5px var(--c),0 0 10px var(--c),0 0 18px var(--c),0 0 30px color-mix(in srgb,var(--c) 65%,transparent)}}
 .hero-sub{{opacity:.85;margin-bottom:.6rem}}
-.gdot{{--c:#4ade80;display:inline-block;width:8px;height:8px;flex:none;border-radius:50%;margin-right:7px;vertical-align:middle;background:var(--c);box-shadow:0 0 10px var(--c);animation:glow 2.4s ease-out infinite}}
+.gdot{{--c:#4ade80;display:inline-block;width:8px;height:8px;flex:none;border-radius:50%;margin-right:7px;vertical-align:middle;background:radial-gradient(circle at 50% 50%,#fff 0,var(--c) 45%,var(--c) 100%);box-shadow:0 0 2px #fff,0 0 5px var(--c),0 0 10px var(--c),0 0 18px var(--c),0 0 30px color-mix(in srgb,var(--c) 65%,transparent)}}
 .gdot.g{{--c:#4ade80}}.gdot.r{{--c:#f87171}}.gdot.a{{--c:#fbbf24}}
-@keyframes glow{{0%{{box-shadow:0 0 0 0 color-mix(in srgb,var(--c) 55%,transparent),0 0 10px var(--c)}}70%,100%{{box-shadow:0 0 0 9px transparent,0 0 10px var(--c)}}}}
-.hero-eyebrow::before{{--c:#5eead4;animation:glow 2.4s ease-out infinite}}
 .market-status .gdot{{margin-right:0}}.mood-cap{{font-size:.85rem;opacity:.8}}.mood-cap .gdot{{margin-left:4px}}
 .stat .d .gdot{{width:7px;height:7px;margin-right:6px}}
 .market-status{{display:flex;align-items:center;gap:8px;width:max-content;max-width:100%;padding:7px 11px;margin:0 0 .7rem;border:1px solid rgba(94,234,212,.2);border-radius:999px;background:rgba(15,118,110,.16);color:#ccfbf1;font-size:.8rem}}
@@ -79,7 +77,7 @@ button:focus-visible,a:focus-visible,input:focus-visible{{outline:3px solid #67e
 .block-container{{padding-left:.9rem;padding-right:.9rem;padding-top:2rem}}.brand{{padding:.9rem;gap:12px;border-radius:18px}}.stat-grid{{grid-template-columns:repeat(2,1fr)}}.stat .v{{font-size:1.1rem}}
 .ftab{{grid-template-columns:1fr}}.gf{{grid-auto-flow:row;grid-template-rows:none;grid-template-columns:1fr}}
 .gf-title{{font-size:1.25rem}}.gf-price{{font-size:2rem}}}}
-@media (prefers-reduced-motion:reduce){{.gdot,.hero-eyebrow::before{{animation:none}}.stApp::before{{animation:none}}div[class*="st-key-card_"]{{transition:none}}}}
+@media (prefers-reduced-motion:reduce){{.stApp::before{{animation:none}}div[class*="st-key-card_"]{{transition:none}}}}
 </style>""", unsafe_allow_html=True)
 
 
