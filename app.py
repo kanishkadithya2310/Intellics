@@ -1,4 +1,4 @@
-"""Intellics v1.6 beta: Indian markets news, explained simply.
+"""Intellics v1.7 beta: Indian markets news, explained simply.
 
 - Animated background video (the whole picture shows on phones too)
 - Dashboard-style navigation: a menu in the LEFT SIDEBAR on laptops and tablets, and tappable
@@ -18,6 +18,12 @@
 - Upcoming dividends, splits and bonus issues
 - 10 financial terms a day (600 unique terms in terms.py, no repeats for 60 days)
 - Sector heatmap, terms quiz, About section, feedback button
+
+v1.7:
+- Trading Challenge: weekly, monthly and overall leaderboards with titles (top 10 overall, top 3 weekly and monthly)
+- The organiser panel is hidden from players (it only opens with a secret link)
+- The week closes by itself on Saturday (the app triggers it on any visit)
+- Database check button and a ready-made supabase_setup.sql
 
 v1.6:
 - About 140 companies are tracked (list lives in companies.py)
@@ -63,7 +69,7 @@ except Exception:  # keep the app alive even if the file is missing
     TERMS = []
 
 # ----------------------------------------------------------------- settings
-VERSION = "1.6 beta"
+VERSION = "1.7 beta"
 NEWS_REFRESH = 120   # seconds between news refreshes
 PRICE_REFRESH = 60   # seconds between price refreshes (60 because many companies are tracked)
 MAX_STORIES = 40
@@ -1469,8 +1475,9 @@ def about_tab() -> None:
                 f"- About {len(COMPANIES)} large companies are tracked, not the whole market.\n"
                 "- The Trading Challenge uses play money and delayed prices. It is a game, not advice.\n"
                 "- Nothing here is investment advice. See the disclaimer below.")
-    st.markdown(f"**What's new in {VERSION}:** Trading Challenge, many more companies, a left sidebar menu, "
-                "sector heatmap, terms quiz, this About page.")
+    st.markdown(f"**What's new in {VERSION}:** Trading Challenge with weekly, monthly and overall leaderboards and titles "
+                "(top 10 overall, top 3 weekly and monthly), a left sidebar menu, many more companies, sector heatmap, "
+                "terms quiz, this About page.")
     if FEEDBACK_URL:
         st.link_button("Found a problem or have an idea? Tell us", FEEDBACK_URL)
     else:
@@ -1641,6 +1648,9 @@ def learn_page() -> None:
 
 def main() -> None:
     init_state()
+    # Closes the Trading Challenge week by itself once Saturday 00:00 IST has passed. It does nothing on weekdays,
+    # never raises, and works on any page, so a keep-alive visit to the app is enough to trigger it.
+    trading_game.auto_close_if_due(lambda: load_prices(all_tickers()), [tk for tk, _ in COMPANIES.values()])
     inject_css()
     video_background()
     header()
