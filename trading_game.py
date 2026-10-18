@@ -17,6 +17,7 @@ v1.7
   (https://YOUR-APP.streamlit.app/?page=game&organiser=YOUR_ORGANISER_KEY) and it still needs the admin password to
   close a week.
 - Database check button (organiser panel): tests the URL, the key, both tables and a real write.
+- Organiser panel can also remove a player (admin password + confirmation).
 - Works with the new Supabase keys (sb_secret_...) as well as the old service_role key.
 
 Where the scores are kept
@@ -288,6 +289,16 @@ def db_patch(nick_key: str, fields: dict) -> None:
     with mem["lock"]:
         if nick_key in mem["players"]:
             mem["players"][nick_key].update(json.loads(json.dumps(fields)))
+
+
+def db_delete(nick_key: str) -> None:
+    """Removes one player (this season) from the players table. Closed weeks in game_weeks are left untouched."""
+    if _sb_config():
+        _sb("players", "DELETE", {"season": f"eq.{SEASON}", "nick_key": f"eq.{nick_key}"})
+        return
+    mem = _memory_db()
+    with mem["lock"]:
+        mem["players"].pop(nick_key, None)
 
 
 def db_save(player: dict) -> None:
@@ -986,7 +997,26 @@ def _organiser_link() -> bool:
     return bool(given) and hmac.compare_digest(given.encode(), key.encode())
 
 
+def _admin_password_ok(password: str) -> tuple[bool, str]:
+    """Checks the admin password with a lock after too many wrong tries. Returns (ok, error message)."""
+    secret = _secret("ADMIN_PIN")
+    admin = _memory_db()["admin"]
+    if not secret:
+        return False, "The admin password is not set. Add ADMIN_PIN in the app's Secrets."
+    if time.time() < admin["until"]:
+        return False, f"Too many wrong passwords. Try again in about {int((admin['until'] - time.time()) // 60) + 1} minute(s)."
+    if not hmac.compare_digest(password.encode(), secret.encode()):
+        admin["fails"] += 1
+        if admin["fails"] >= ADMIN_MAX_TRIES:
+            admin["fails"], admin["until"] = 0, time.time() + ADMIN_LOCK_MINUTES * 60
+        return False, "Wrong password."
+    admin["fails"] = 0
+    return True, ""
+
+
 def _organiser_panel(get_prices: Callable[[], dict], companies: dict[str, str]) -> None:
+    """Hidden from players: it is drawn ONLY when the page was opened with the secret organiser link.
+    Without that link nothing here is shown, so players are never asked for an admin password."""
     if not _organiser_link():
         return
     with st.expander("🔐 Organisers only", expanded=True):
@@ -1003,31 +1033,56 @@ def _organiser_panel(get_prices: Callable[[], dict], companies: dict[str, str]) 
             if all(ok for ok, _ in results):
                 st.success("Everything looks good. Scores are being saved permanently.")
 
-        st.markdown("**2. Close the week**")
-        secret = _secret("ADMIN_PIN")
-        if not secret:
-            st.info("The admin password is not set. Add ADMIN_PIN in the app's Secrets to use this button.")
+        if not _secret("ADMIN_PIN"):
+            st.info("The admin password is not set. Add ADMIN_PIN in the app's Secrets to use the buttons below.")
             return
+        st.markdown("**2. Admin actions**")
+        password = st.text_input("Admin password", type="password", key="g_admin_pw")
+
+        st.markdown("**Close the week**")
         st.caption("The week already closes by itself on Saturday at 12:00 am IST. Use this only to close it early by hand. "
                    "It saves everyone's value as next week's starting point and announces the winner. It cannot be undone from the app.")
-        password = st.text_input("Admin password", type="password", key="g_admin_pw")
         sure = st.checkbox("I am sure I want to close this week", key="g_admin_sure")
-        if not st.button("Close week now", type="primary", key="g_close_btn"):
-            return
-        admin = _memory_db()["admin"]
-        if time.time() < admin["until"]:
-            st.error(f"Too many wrong passwords. Try again in about {int((admin['until'] - time.time()) // 60) + 1} minute(s).")
-        elif not hmac.compare_digest(password.encode(), secret.encode()):
-            admin["fails"] += 1
-            if admin["fails"] >= ADMIN_MAX_TRIES:
-                admin["fails"], admin["until"] = 0, time.time() + ADMIN_LOCK_MINUTES * 60
-            st.error("Wrong password.")
-        elif not sure:
-            st.warning("Tick the box to confirm.")
-        else:
-            admin["fails"] = 0
-            st.session_state["g_admin_msg"] = close_week(get_prices(), list(companies.values()))
-            st.rerun()
+        if st.button("Close week now", type="primary", key="g_close_btn"):
+            ok, err = _admin_password_ok(password)
+            if not ok:
+                st.error(err)
+            elif not sure:
+                st.warning("Tick the box to confirm.")
+            else:
+                st.session_state["g_admin_msg"] = close_week(get_prices(), list(companies.values()))
+                st.rerun()
+
+        st.markdown("**Remove a player**")
+        st.caption("Permanently deletes the player's account and portfolio. Their nickname becomes free again. "
+                   "Weeks that are already closed keep their winner. It cannot be undone.")
+        try:
+            names = {p["nick_key"]: _who_plain(p["display"], p.get("real_name")) for p in db_list()}
+        except GameDBError as exc:
+            names = {}
+            st.error(str(exc))
+        if names:
+            pick = st.selectbox("Player to remove", sorted(names, key=lambda k: names[k].lower()),
+                                format_func=lambda k: names[k], index=None, placeholder="Choose a player...", key="g_del_pick")
+            sure_del = st.checkbox("I am sure I want to delete this player", key="g_del_sure")
+            if st.button("Delete player", key="g_del_btn"):
+                ok, err = _admin_password_ok(password)
+                if not ok:
+                    st.error(err)
+                elif not pick:
+                    st.warning("Choose a player first.")
+                elif not sure_del:
+                    st.warning("Tick the box to confirm.")
+                else:
+                    try:
+                        db_delete(pick)
+                        _clear_caches()
+                        st.session_state["g_admin_msg"] = (True, f"Deleted {names[pick]}.")
+                    except GameDBError as exc:
+                        st.session_state["g_admin_msg"] = (False, str(exc))
+                    st.rerun()
+        elif not names:
+            st.caption("There are no players to remove.")
 
 
 def _rules_panel() -> None:
